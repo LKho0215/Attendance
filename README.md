@@ -1,109 +1,279 @@
-# Modern Attendance System
+# Modern Face Recognition Attendance System
 
-A comprehensive attendance tracking system with face recognition and barcode/QR code scanning capabilities.
+A comprehensive attendance tracking system with advanced face recognition, barcode/QR code scanning, and MongoDB integration.
 
-## Features
+## 🌟 Features
 
-- **Face Recognition**: OpenCV-powered face detection and recognition  
+### Core Functionality
+- **Advanced Face Recognition**: DeepFace with MobileFaceNet for high-accuracy recognition
 - **Barcode/QR Code Scanning**: Support for employee ID scanning
+- **MongoDB Integration**: Robust database with location-based attendance
+- **Manual Camera Control**: User-activated camera for privacy and control
+- **Confidence Filtering**: Smart threshold system (0.5) with visual feedback
+
+### User Interface
 - **Modern GUI**: Clean, intuitive interface using CustomTkinter
-- **Database Management**: SQLite-based employee and attendance tracking
-- **Real-time Camera**: Live video feed for face recognition
-- **Attendance Reports**: View daily and historical attendance data
+- **Real-time Camera Preview**: Live video feed with face detection boxes
+- **Color-coded Detection**: Green (recognized), Yellow (unknown), Orange (low confidence)
+- **Confirmation Dialogs**: Prevent accidental clock-ins with user confirmation
+- **Fullscreen Kiosk Mode**: Optimized for touchscreen/keyboard operation
 
-## Installation
+### Attendance Management
+- **Dual-mode Operation**: CLOCK (time tracking) and CHECK (presence verification)
+- **Location-based Tracking**: Multiple location support with favorites
+- **Late Clock-in Detection**: Automatic flagging of late arrivals
+- **Clock-out Restrictions**: Prevents early departures
+- **Excel Export**: Professional reports with date filtering
 
-1. **Install Dependencies**:
+### Performance & Optimization
+- **60 FPS Camera**: Smooth video preview with optimized frame processing
+- **Background Processing**: Non-blocking face recognition with threading
+- **CPU Monitoring**: Performance tracking and optimization
+- **Memory Management**: Efficient garbage collection and resource handling
+
+## 🔧 Installation
+
+### Prerequisites
+- Python 3.11+
+- MongoDB (local or Atlas)
+- Windows 10/11 (optimized for Windows)
+
+### Setup Steps
+
+1. **Clone the Repository**:
+   ```bash
+   git clone https://github.com/LKho0215/Attendance.git
+   cd Attendance
+   ```
+
+2. **Install Dependencies**:
    ```bash
    pip install -r requirements.txt
    ```
 
-2. **Create Sample Data** (optional):
-   ```bash
-   python sample_data.py
-   ```
+3. **Configure MongoDB**:
+   - Edit `mongo_config.py` with your MongoDB connection details
+   - For local MongoDB: Update connection string
+   - For MongoDB Atlas: Add your cluster connection string
 
-3. **Run the Application**:
-   ```bash
-   python main.py
-   ```
-
-4. **Run in Kiosk Mode** (for touchscreen/keyboard-only setups):
+4. **Run the Application**:
    ```bash
    python simple_kiosk.py
    ```
-- **Real-time Updates**: Live attendance tracking and reporting
 
-## Requirements
+## 🚀 Quick Start
 
-- Python 3.8+
-- OpenCV
-- customtkinter
-- PIL (Pillow)
-- pyzbar (for barcode/QR scanning)
-- sqlite3 (built-in)
-- face-recognition
+### First Time Setup
+1. **Start the System**: Run `python simple_kiosk.py`
+2. **Register Employees**: Press `F2` or click Register to add new employees
+3. **Activate Camera**: Press `+` to turn on camera for face recognition
+4. **Scan QR Codes**: Use `F3` or scan employee QR codes
 
-## Installation
+### Daily Operation
+1. **Employee Interaction**: Press `+` to activate camera
+2. **Face Recognition**: System detects and recognizes faces automatically
+3. **Confirmation**: Employee confirms attendance in dialog
+4. **Completion**: Camera deactivates, attendance recorded
 
-1. Install Python dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-2. Run the application:
-```bash
-python main.py
-```
-
-## Project Structure
+## 📁 Project Structure
 
 ```
-attendance-system/
-├── main.py                 # Full GUI application
-├── simple_kiosk.py        # Kiosk mode (recommended for your setup)
-├── requirements.txt        # Python dependencies
-├── sample_data.py         # Sample data generator
-├── verify_system.py       # System verification script
-├── README.md              # Documentation
-├── core/                  # Core business logic
-│   ├── __init__.py
-│   ├── attendance.py      # Attendance management
-│   ├── barcode_scanner.py # Barcode/QR scanning
-│   ├── database.py        # Database operations
-│   └── face_recognition.py # Face recognition system
-├── gui/                   # Full GUI interface
-│   ├── __init__.py
-│   └── main_window.py     # Main GUI window
-├── data/                  # Data storage
-│   ├── database/          # SQLite database files
-│   ├── faces/            # Face image storage
-│   └── temp/             # Temporary files
-└── assets/               # UI assets
-    ├── icons/
-    └── images/
+Attendance/
+├── simple_kiosk.py           # Main kiosk application
+├── mongo_config.py           # MongoDB configuration
+├── requirements.txt          # Python dependencies
+├── .gitignore               # Git ignore rules
+├── core/                    # Core business logic
+│   ├── attendance.py        # Attendance management
+│   ├── deepface_recognition.py # Face recognition system
+│   ├── mongodb_manager.py   # Database operations
+│   ├── mongo_location_manager.py # Location management
+│   └── barcode_scanner.py   # QR/Barcode scanning
+├── data/                    # Data storage
+│   ├── database/           # SQLite backup
+│   ├── faces/             # Face images (temporary)
+│   └── temp/              # Temporary files
+├── exports/               # Excel export files
+├── dist/                  # Compiled executables
+└── docs/                  # Documentation files
 ```
 
-## Usage
+## 💾 Database Schema
 
-1. **Employee Management**: Add new employees with their photos and employee IDs
-2. **Face Recognition**: Click on "Face Recognition" to start facial attendance
-3. **Barcode/QR Scanning**: Use "Scan Code" for barcode/QR code attendance
-4. **View Records**: Check attendance history and generate reports
+### MongoDB Collections
 
-## Database Schema
+#### employees
+```javascript
+{
+  "_id": ObjectId,
+  "employee_id": "EMP001",
+  "name": "John Doe",
+  "department": "Engineering",
+  "face_vectors": [Array of face embeddings],
+  "created_at": ISODate
+}
+```
 
-### Employees Table
-- id (PRIMARY KEY)
-- employee_id (UNIQUE)
-- name
-- department
-- face_encoding (for face recognition)
-- created_at
+#### attendance
+```javascript
+{
+  "_id": ObjectId,
+  "employee_id": "EMP001",
+  "employee_name": "John Doe",
+  "timestamp": ISODate,
+  "method": "face|qr|barcode",
+  "action": "CLOCK_IN|CLOCK_OUT|CHECK_IN",
+  "location_name": "Main Office",
+  "location_address": "123 Main St",
+  "is_late": false,
+  "confidence": 0.85
+}
+```
 
-### Attendance Table
-- id (PRIMARY KEY)
-- employee_id (FOREIGN KEY)
-- timestamp
-- method (face/barcode/qr)
-- status (in/out)
+#### favorite_locations
+```javascript
+{
+  "_id": ObjectId,
+  "name": "Main Office",
+  "address": "123 Main Street, City",
+  "usage_count": 150,
+  "last_used": ISODate
+}
+```
+
+## 🎯 Usage Guide
+
+### Keyboard Shortcuts
+- `F1`: Toggle between CLOCK and CHECK mode
+- `F2`: Open employee registration dialog
+- `F3`: Manual QR/barcode scan mode
+- `F4`: Export attendance to Excel
+- `F5`: Refresh attendance history
+- `+`: Activate camera for face recognition
+- `Esc`: Close dialogs or exit
+
+### Employee Registration
+1. Press `F2` to open registration dialog
+2. Enter employee details (ID, name, department)
+3. Take 8 diverse face photos for training
+4. System creates face vectors automatically
+5. Employee ready for recognition
+
+### Attendance Workflow
+1. **Camera Activation**: Employee presses `+`
+2. **Face Detection**: Orange box shows face detected
+3. **Recognition**: Green box shows recognized employee
+4. **Confirmation**: Dialog asks for confirmation
+5. **Recording**: Attendance saved to database
+6. **Completion**: Camera deactivates automatically
+
+### Location Management
+- System remembers frequently used locations
+- Favorite locations appear first in dropdown
+- Manual location entry supported
+- Location history tracked for reporting
+
+## 📊 Features in Detail
+
+### Face Recognition System
+- **Model**: DeepFace with MobileFaceNet (lightweight, fast)
+- **Detection**: Haar Cascades for face detection
+- **Recognition**: Vector similarity matching
+- **Threshold**: 0.5 minimum confidence with visual feedback
+- **Performance**: 60 FPS camera with background processing
+
+### Attendance Modes
+- **CLOCK Mode**: Traditional time tracking with IN/OUT
+- **CHECK Mode**: Presence verification without time tracking
+- **Dual Support**: Switch between modes as needed
+
+### Security Features
+- **Confidence Thresholds**: Prevents false positives
+- **Confirmation Dialogs**: User verification required
+- **Manual Camera**: Privacy-focused, user-controlled activation
+- **Audit Trail**: Complete attendance history with timestamps
+
+## 🔧 Configuration
+
+### Camera Settings
+```python
+# In core/deepface_recognition.py
+CONFIDENCE_THRESHOLD = 0.5  # Minimum recognition confidence
+FPS_TARGET = 60            # Camera frame rate
+FRAME_SKIP = 5             # Process every 5th frame
+```
+
+### MongoDB Settings
+```python
+# In mongo_config.py
+MONGODB_URI = "mongodb://localhost:27017/"
+DATABASE_NAME = "attendance_system"
+```
+
+## 📈 Performance Optimization
+
+### Camera Performance
+- 60 FPS video preview
+- Background face processing
+- Frame skipping for efficiency
+- Buffer size optimization
+
+### Memory Management
+- Automatic garbage collection
+- Resource cleanup on errors
+- Efficient face vector storage
+
+### CPU Monitoring
+- Real-time CPU usage tracking
+- Performance logging
+- Bottleneck identification
+
+## 🚨 Troubleshooting
+
+### Common Issues
+
+**Camera Not Working**
+- Check if camera is in use by another application
+- Verify camera permissions
+- Try different camera index in settings
+
+**Face Recognition Poor**
+- Ensure good lighting conditions
+- Position face clearly in camera view
+- Re-register employee with better photos
+
+**MongoDB Connection**
+- Verify MongoDB service is running
+- Check connection string in `mongo_config.py`
+- Ensure network connectivity for Atlas
+
+**Performance Issues**
+- Close unnecessary applications
+- Check CPU usage in logs
+- Consider reducing frame rate
+
+## 🔄 Updates & Maintenance
+
+### Regular Maintenance
+- Monitor database size and performance
+- Clean up temporary files periodically
+- Update face vectors for improved accuracy
+- Export attendance data for backup
+
+### System Updates
+- Keep Python dependencies updated
+- Monitor MongoDB performance
+- Review and adjust confidence thresholds
+- Update documentation as needed
+
+## 📄 License
+
+This project is proprietary software. All rights reserved.
+
+## 🤝 Support
+
+For technical support or feature requests, please contact the development team.
+
+---
+
+**Built with ❤️ using Python, OpenCV, DeepFace, MongoDB, and CustomTkinter**
