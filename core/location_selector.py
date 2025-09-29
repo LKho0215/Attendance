@@ -48,7 +48,7 @@ class LocationSelector:
         self.create_footer()
         
         # Load initial data
-        self.load_suggestions()
+        self.load_initial_content()
         
         # Focus on search entry
         self.search_entry.focus_set()
@@ -97,56 +97,40 @@ class LocationSelector:
         self.search_btn.grid(row=1, column=2, padx=(10, 10), pady=5)
     
     def create_main_content(self):
-        """Create main content area with tabs"""
-        # Create notebook-style tabs
+        """Create main content area with simplified tabs"""
+        # Create main frame
         self.main_frame = ctk.CTkFrame(self.dialog)
         self.main_frame.grid(row=1, column=0, sticky="nsew", padx=20, pady=(0, 20))
         self.main_frame.grid_columnconfigure(0, weight=1)
         self.main_frame.grid_rowconfigure(1, weight=1)
         
-        # Tab buttons
+        # Tab buttons - only Search Results and Manual Input
         tab_frame = ctk.CTkFrame(self.main_frame)
         tab_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
         
-        self.favorites_btn = ctk.CTkButton(
-            tab_frame,
-            text="⭐ Favorites",
-            command=lambda: self.switch_tab("favorites"),
-            width=120
-        )
-        self.favorites_btn.pack(side="left", padx=5)
-        
-        self.recent_btn = ctk.CTkButton(
-            tab_frame,
-            text="🕒 Recent",
-            command=lambda: self.switch_tab("recent"),
-            width=120
-        )
-        self.recent_btn.pack(side="left", padx=5)
-        
-        self.popular_btn = ctk.CTkButton(
-            tab_frame,
-            text="🔥 Popular",
-            command=lambda: self.switch_tab("popular"),
-            width=120
-        )
-        self.popular_btn.pack(side="left", padx=5)
-        
         self.search_results_btn = ctk.CTkButton(
             tab_frame,
-            text="🔍 Search Results",
+            text="Search Results",
             command=lambda: self.switch_tab("search"),
             width=140
         )
         self.search_results_btn.pack(side="left", padx=5)
+        
+        self.manual_input_btn = ctk.CTkButton(
+            tab_frame,
+            text="Manual Input",
+            command=lambda: self.switch_tab("manual"),
+            width=140
+        )
+        self.manual_input_btn.pack(side="left", padx=5)
         
         # Content area
         self.content_frame = ctk.CTkScrollableFrame(self.main_frame)
         self.content_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
         
         # Current tab
-        self.current_tab = "favorites"
-        self.switch_tab("favorites")
+        self.current_tab = "search"
+        self.switch_tab("search")
     
     def create_footer(self):
         """Create dialog footer with action buttons"""
@@ -199,10 +183,8 @@ class LocationSelector:
         
         # Update button colors
         buttons = {
-            "favorites": self.favorites_btn,
-            "recent": self.recent_btn,
-            "popular": self.popular_btn,
-            "search": self.search_results_btn
+            "search": self.search_results_btn,
+            "manual": self.manual_input_btn
         }
         
         for name, btn in buttons.items():
@@ -212,71 +194,157 @@ class LocationSelector:
                 btn.configure(fg_color=("gray70", "gray30"))
         
         # Load content for selected tab
-        if tab_name == "favorites":
-            self.load_favorites()
-        elif tab_name == "recent":
-            self.load_recent()
-        elif tab_name == "popular":
-            self.load_popular()
-        elif tab_name == "search":
+        if tab_name == "search":
             self.display_search_results()
+        elif tab_name == "manual":
+            self.show_manual_input()
     
-    def load_suggestions(self):
-        """Load initial suggestions (favorites and recent)"""
-        self.load_favorites()
+    def load_initial_content(self):
+        """Load initial content (search instructions)"""
+        self.show_search_instructions()
     
-    def load_favorites(self):
-        """Load user's favorite locations"""
+    def show_search_instructions(self):
+        """Show search instructions when no search has been performed"""
         self.clear_content()
         
-        # Add loading indicator
-        loading_label = ctk.CTkLabel(
-            self.content_frame,
-            text="Loading favorites...",
-            font=ctk.CTkFont(size=14)
+        # Instructions frame
+        instructions_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+        instructions_frame.pack(fill="x", padx=20, pady=30)
+        
+        # Icon and title
+        icon_label = ctk.CTkLabel(
+            instructions_frame,
+            text="🔍",
+            font=ctk.CTkFont(size=48)
         )
-        loading_label.pack(pady=20)
+        icon_label.pack(pady=(0, 10))
         
-        # Load in background
-        def load_data():
-            favorites = self.location_manager.get_favorite_locations(self.employee_id)
-            self.dialog.after(0, lambda: self.display_locations(favorites, "favorites"))
+        title_label = ctk.CTkLabel(
+            instructions_frame,
+            text="Search for Your Location",
+            font=ctk.CTkFont(size=18, weight="bold")
+        )
+        title_label.pack(pady=(0, 10))
         
-        threading.Thread(target=load_data, daemon=True).start()
+        # Instructions
+        instructions_text = """Type in the search box above to find your location:
+        
+• Business names (e.g., "KLCC", "Sunway Pyramid")
+• Addresses (e.g., "Jalan Bukit Bintang")
+• Areas (e.g., "Mont Kiara", "Bangsar")
+• Landmarks (e.g., "Twin Towers", "KL Sentral")
+
+Or switch to Manual Input to type your location directly."""
+        
+        instructions_label = ctk.CTkLabel(
+            instructions_frame,
+            text=instructions_text,
+            font=ctk.CTkFont(size=14),
+            justify="left"
+        )
+        instructions_label.pack(pady=10)
     
-    def load_recent(self):
-        """Load recent locations"""
+    def show_manual_input(self):
+        """Show manual input interface"""
         self.clear_content()
         
-        loading_label = ctk.CTkLabel(
-            self.content_frame,
-            text="Loading recent locations...",
-            font=ctk.CTkFont(size=14)
+        # Manual input frame
+        manual_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+        manual_frame.pack(fill="x", padx=20, pady=30)
+        
+        # Title
+        title_label = ctk.CTkLabel(
+            manual_frame,
+            text="✏️ Enter Location Manually",
+            font=ctk.CTkFont(size=18, weight="bold")
         )
-        loading_label.pack(pady=20)
+        title_label.pack(pady=(0, 20))
         
-        def load_data():
-            recent = self.location_manager.get_recent_locations(self.employee_id)
-            self.dialog.after(0, lambda: self.display_locations(recent, "recent"))
+        # Manual location input
+        location_label = ctk.CTkLabel(
+            manual_frame,
+            text="Location Name:",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w"
+        )
+        location_label.pack(fill="x", pady=(0, 5))
         
-        threading.Thread(target=load_data, daemon=True).start()
+        self.manual_location_entry = ctk.CTkEntry(
+            manual_frame,
+            placeholder_text="Enter location name (e.g., Client Office, Home, Site Visit)",
+            font=ctk.CTkFont(size=14),
+            height=40
+        )
+        self.manual_location_entry.pack(fill="x", pady=(0, 15))
+        self.manual_location_entry.bind('<KeyRelease>', self.on_manual_input_changed)
+        
+        # Optional address input
+        address_label = ctk.CTkLabel(
+            manual_frame,
+            text="Address (Optional):",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w"
+        )
+        address_label.pack(fill="x", pady=(0, 5))
+        
+        self.manual_address_entry = ctk.CTkEntry(
+            manual_frame,
+            placeholder_text="Enter address or description (optional)",
+            font=ctk.CTkFont(size=14),
+            height=40
+        )
+        self.manual_address_entry.pack(fill="x", pady=(0, 20))
+        self.manual_address_entry.bind('<KeyRelease>', self.on_manual_input_changed)
+        
+        # Example text
+        example_label = ctk.CTkLabel(
+            manual_frame,
+            text="Examples: 'Client Meeting', 'Site Inspection', 'Home Office', 'Field Work'",
+            font=ctk.CTkFont(size=12),
+            text_color="gray"
+        )
+        example_label.pack(pady=(10, 0))
     
-    def load_popular(self):
-        """Load popular locations"""
-        self.clear_content()
+    def on_manual_input_changed(self, event):
+        """Handle manual input changes"""
+        location_name = self.manual_location_entry.get().strip()
         
-        loading_label = ctk.CTkLabel(
-            self.content_frame,
-            text="Loading popular locations...",
-            font=ctk.CTkFont(size=14)
-        )
-        loading_label.pack(pady=20)
+        # Enable/disable use button based on input
+        if len(location_name) >= 2:
+            self.confirm_btn.configure(state="normal", fg_color=("green", "darkgreen"))
+            
+            # Auto-select manual location
+            address = self.manual_address_entry.get().strip()
+            manual_location = {
+                'name': location_name,
+                'address': address if address else location_name,
+                'latitude': None,
+                'longitude': None,
+                'manual_input': True
+            }
+            self.select_location(manual_location)
+        else:
+            # Clear selection if input is too short
+            self.selected_location = None
+            self.selection_label.configure(text="No location selected", text_color="gray")
+            self.confirm_btn.configure(state="disabled", fg_color=("gray70", "gray30"))
+    
+    def use_manual_location(self):
+        """Use manually entered location"""
+        location_name = self.manual_location_entry.get().strip()
+        address = self.manual_address_entry.get().strip()
         
-        def load_data():
-            popular = self.location_manager.get_popular_locations()
-            self.dialog.after(0, lambda: self.display_locations(popular, "popular"))
-        
-        threading.Thread(target=load_data, daemon=True).start()
+        if len(location_name) >= 2:
+            manual_location = {
+                'name': location_name,
+                'address': address if address else location_name,
+                'latitude': None,
+                'longitude': None,
+                'manual_input': True
+            }
+            
+            self.selected_location = manual_location
+            self.confirm_selection()
     
     def on_search_changed(self, event):
         """Handle search text changes with debouncing"""
@@ -329,6 +397,9 @@ class LocationSelector:
     
     def display_search_results(self):
         """Display search results"""
+        if not hasattr(self, 'search_results') or not self.search_results:
+            self.show_search_instructions()
+            return
         self.display_locations(self.search_results, "search")
     
     def show_search_error(self):
@@ -348,10 +419,7 @@ class LocationSelector:
         
         if not locations:
             no_results_msg = {
-                "favorites": "No favorite locations yet.\nUse search to find and select locations.",
-                "recent": "No recent locations.\nUse search to find new locations.",
-                "popular": "No popular locations available.",
-                "search": "No locations found.\nTry a different search term."
+                "search": "No locations found.\nTry a different search term or use Manual Input tab."
             }
             
             no_results_label = ctk.CTkLabel(
@@ -403,16 +471,12 @@ class LocationSelector:
             address_label.pack(fill="x", pady=(2, 0))
             address_label.bind("<Button-1>", lambda e: self.select_location(location))
         
-        # Additional info (for favorites/recent/popular)
+        # Additional info (only for search results with useful data)
         info_parts = []
-        if location.get('is_favorite'):
-            info_parts.append("⭐ Favorite")
-        if location.get('is_recent'):
-            info_parts.append("🕒 Recent")
-        if location.get('is_popular'):
-            info_parts.append("🔥 Popular")
         if location.get('use_count', 0) > 1:
             info_parts.append(f"Used {location['use_count']} times")
+        if location.get('manual_input'):
+            info_parts.append("✏️ Manual Input")
         
         if info_parts:
             info_label = ctk.CTkLabel(

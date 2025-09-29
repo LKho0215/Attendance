@@ -125,19 +125,20 @@ class MongoDBManager:
         """Get current timestamp as datetime object"""
         return datetime.now()
     
-    def add_employee(self, employee_id, name, department=None, face_image_path=None):
+    def add_employee(self, employee_id, name, department=None, role="Staff", face_image_path=None):
         """Add a new employee to the database"""
         try:
             employee_doc = {
                 "employee_id": employee_id,
                 "name": name,
                 "department": department,
+                "role": role,
                 "face_image_path": face_image_path,
                 "created_at": datetime.now()
             }
             
             result = self.employees.insert_one(employee_doc)
-            print(f"[MONGODB] Added employee: {name} ({employee_id})")
+            print(f"[MONGODB] Added employee: {name} ({employee_id}) - {role}")
             return True
             
         except Exception as e:
@@ -157,6 +158,7 @@ class MongoDBManager:
                     'employee_id': employee['employee_id'],
                     'name': employee['name'],
                     'department': employee.get('department'),
+                    'role': employee.get('role', 'Staff'),
                     'face_image_path': employee.get('face_image_path')
                 }
             return None
@@ -178,6 +180,7 @@ class MongoDBManager:
                     'employee_id': emp['employee_id'],
                     'name': emp['name'],
                     'department': emp.get('department', ''),
+                    'role': emp.get('role', 'Staff'),
                     'face_vector': emp.get('face_vector')  # Include face vector for DeepFace recognition
                 }
                 for emp in employees
@@ -226,6 +229,8 @@ class MongoDBManager:
                 {
                     'employee_id': emp['employee_id'],
                     'name': emp['name'],
+                    'department': emp.get('department'),
+                    'role': emp.get('role', 'Staff'),
                     'face_vector': emp['face_vector']
                 }
                 for emp in employees
@@ -277,7 +282,7 @@ class MongoDBManager:
             print(f"[MONGODB ERROR] Failed to update face vector: {e}")
             return False
     
-    def add_employee_with_face_vector(self, employee_id, name, face_vector, department=None):
+    def add_employee_with_face_vector(self, employee_id, name, face_vector, department=None, role="Staff"):
         """Add a new employee with face vector"""
         try:
             # Ensure face_vector is a list for JSON serialization
@@ -288,6 +293,7 @@ class MongoDBManager:
                 "employee_id": employee_id,
                 "name": name,
                 "department": department,
+                "role": role,
                 "face_vector": face_vector,
                 "face_vector_created": self.get_current_timestamp(),
                 "created_at": self.get_current_timestamp()
@@ -295,7 +301,7 @@ class MongoDBManager:
             
             result = self.employees.insert_one(employee_data)
             if result.inserted_id:
-                print(f"[MONGODB] Added employee {employee_id} with face vector")
+                print(f"[MONGODB] Added employee {employee_id} ({role}) with face vector")
                 return True
             return False
             

@@ -32,18 +32,19 @@ class DeepFaceRecognitionSystem:
     - Uses DeepFace ArcFace for high-accuracy feature extraction and recognition
     """
     
-    def __init__(self, model_name='Facenet', detector_backend='opencv'):
+    def __init__(self, model_name='ArcFace', detector_backend='opencv'):
         """
         Initialize the hybrid face recognition system
         
         Args:
-            model_name: Face recognition model ('Facenet', 'ArcFace', 'VGG-Face', etc.)
-                       Using Facenet (MobileFaceNet) for lightweight performance
+            model_name: Face recognition model ('ArcFace', 'Facenet', 'VGG-Face', etc.)
+                       Using ArcFace for state-of-the-art accuracy
             detector_backend: Face detection backend (not used, we use Haar)
         """
         self.model_name = model_name
         self.detector_backend = detector_backend
         self.known_faces = {}  # employee_id -> face_embedding
+        self.debug_distances = True  # Enable distance debugging
         
         # Initialize Haar Cascade for face detection
         self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
@@ -51,7 +52,8 @@ class DeepFaceRecognitionSystem:
         
         # DeepFace model settings - optimized for MobileFaceNet
         self.target_size = (160, 160)  # MobileFaceNet input size (smaller than ArcFace)
-        self.threshold = 0.75  # Adjusted threshold for MobileFaceNet (slightly higher for stability)
+        self.threshold = 0.50  # Much more strict threshold - reduced from 0.68 to 0.50 for higher accuracy
+        self.distance_threshold = 0.25  # Slightly relaxed from 0.20 to 0.25 for better usability while maintaining accuracy
         
         # Recognition caching for performance
         self.recognition_cache = {}  # Cache recent recognition results
@@ -73,7 +75,7 @@ class DeepFaceRecognitionSystem:
         self.latest_results = []
         self.results_lock = threading.Lock()
         
-        logger.info(f"DeepFace Recognition System initialized with {model_name} model (MobileFaceNet), threshold: {self.threshold}")
+        logger.info(f"DeepFace Recognition System initialized with {model_name} model (ArcFace - State-of-the-art), threshold: {self.threshold}")
         
         # Verify DeepFace installation and download models if needed
         self._verify_and_download_models()
@@ -287,28 +289,55 @@ class DeepFaceRecognitionSystem:
         Load known face embeddings from database
         
         Args:
-            db_manager: Database manager instance with get_all_employees method
+            db_manager: Database manager instance with get_all_face_vectors method
         """
         try:
-            employees = db_manager.get_all_employees()
+            # Try to load face vectors first (new method)
+            employees_with_vectors = db_manager.get_all_face_vectors()
             self.known_faces.clear()
             
-            face_count = 0
-            for employee in employees:
-                if 'face_vector' in employee and employee['face_vector']:
-                    # Convert face vector to numpy array
-                    face_embedding = np.array(employee['face_vector'])
-                    self.known_faces[employee['employee_id']] = {
-                        'name': employee['name'],
-                        'embedding': face_embedding
-                    }
-                    face_count += 1
-                    logger.debug(f"Loaded face embedding for {employee['name']} ({employee['employee_id']})")
-            
-            logger.info(f"✅ Loaded {face_count} face embeddings from database")
+            if employees_with_vectors:
+                # Use new face vector system
+                face_count = 0
+                for employee in employees_with_vectors:
+                    if 'face_vector' in employee and employee['face_vector']:
+                        # Convert face vector to numpy array
+                        face_embedding = np.array(employee['face_vector'])
+                        self.known_faces[employee['employee_id']] = {
+                            'name': employee['name'],
+                            'embedding': face_embedding
+                        }
+                        face_count += 1
+                        logger.debug(f"Loaded face vector for {employee['name']} ({employee['employee_id']})")
+                
+                logger.info(f"✅ Loaded {face_count} face vectors from database")
+                
+            else:
+                # Fallback to old employee method for backward compatibility
+                logger.info("No face vectors found, checking for legacy face images...")
+                employees = db_manager.get_all_employees()
+                
+                face_count = 0
+                for employee in employees:
+                    if 'face_vector' in employee and employee['face_vector']:
+                        # Convert face vector to numpy array
+                        face_embedding = np.array(employee['face_vector'])
+                        self.known_faces[employee['employee_id']] = {
+                            'name': employee['name'],
+                            'embedding': face_embedding
+                        }
+                        face_count += 1
+                        logger.debug(f"Loaded face embedding for {employee['name']} ({employee['employee_id']})")
+                
+                if face_count == 0:
+                    logger.warning("⚠️  No face vectors found in database. Please register employees with face capture.")
+                else:
+                    logger.info(f"✅ Loaded {face_count} face embeddings from legacy storage")
             
         except Exception as e:
             logger.error(f"❌ Error loading known faces: {e}")
+            # Clear known faces on error to prevent issues
+            self.known_faces.clear()
     
     def recognize_face(self, image_array: np.ndarray, confidence_threshold: float = None) -> Tuple[Optional[str], float]:
         """
@@ -356,9 +385,26 @@ class DeepFaceRecognitionSystem:
                     best_distance = distance
                     best_match = employee_id
             
-            # Check if best match is within threshold
-            if best_match and best_distance < threshold:
+            # Check if best match is within threshold and has compatible dimensions
+            if best_match and best_distance < self.distance_threshold:  # Use stricter distance_threshold instead of threshold
+                # Verify embedding dimensions match
+                if isinstance(self.known_faces[best_match], dict):
+                    known_embedding = self.known_faces[best_match]['embedding']
+                else:
+                    known_embedding = self.known_faces[best_match]
+                
+                # Check dimension compatibility
+                if len(face_embedding) != len(known_embedding):
+                    logger.warning(f"Dimension mismatch: current={len(face_embedding)}, stored={len(known_embedding)}. Skipping {best_match}.")
+                    logger.info("💡 Please re-register employees after model upgrade for better accuracy")
+                    return None, 0.0
+                
                 confidence = max(0.0, 1.0 - best_distance)  # Convert distance to confidence
+                
+                # Additional confidence check - reject low confidence matches
+                if confidence < 0.75:  # Slightly relaxed from 0.80 to 0.75 for better usability
+                    logger.info(f"Recognition confidence too low: {confidence:.2f} < 0.75 for {best_match}")
+                    return None, 0.0
                 
                 # Get name if available
                 if isinstance(self.known_faces[best_match], dict):
@@ -369,7 +415,10 @@ class DeepFaceRecognitionSystem:
                 logger.info(f"Face recognized: {name} ({best_match}) with distance {best_distance:.3f}, confidence {confidence:.2f}")
                 return best_match, confidence
             else:
-                logger.info(f"No face match found - best: {best_match}, distance: {best_distance:.3f}, threshold: {threshold}")
+                if best_match:
+                    logger.info(f"Face match found but distance too high: {best_match}, distance: {best_distance:.3f}, threshold: {self.distance_threshold}")
+                else:
+                    logger.info(f"No face match found in {len(self.known_faces)} known faces")
                 return None, 0.0
                 
         except Exception as e:
@@ -388,6 +437,11 @@ class DeepFaceRecognitionSystem:
             Distance value (lower = more similar)
         """
         try:
+            # Check dimension compatibility
+            if len(embedding1) != len(embedding2):
+                logger.warning(f"Embedding dimension mismatch: {len(embedding1)} vs {len(embedding2)}")
+                return float('inf')  # Return maximum distance for incompatible embeddings
+            
             # Normalize embeddings
             norm1 = embedding1 / np.linalg.norm(embedding1)
             norm2 = embedding2 / np.linalg.norm(embedding2)
@@ -402,40 +456,140 @@ class DeepFaceRecognitionSystem:
             logger.error(f"Error calculating distance: {e}")
             return float('inf')
     
-    def create_face_embedding_from_images(self, image_arrays: List[np.ndarray]) -> Optional[np.ndarray]:
+    def extract_multiple_face_embeddings(self, image_array: np.ndarray, num_extractions: int = 5) -> List[np.ndarray]:
         """
-        Create averaged face embedding from multiple images for better accuracy
+        Extract multiple face embeddings from the same image for better accuracy
+        
+        Args:
+            image_array: Input image as numpy array
+            num_extractions: Number of embeddings to extract
+            
+        Returns:
+            List of face embeddings or empty list if no valid embeddings found
+        """
+        embeddings = []
+        
+        try:
+            for i in range(num_extractions):
+                # Add slight variations to improve robustness
+                if i == 0:
+                    # Original image
+                    processed_img = image_array
+                elif i == 1:
+                    # Slightly enhance contrast
+                    processed_img = cv2.convertScaleAbs(image_array, alpha=1.1, beta=10)
+                elif i == 2:
+                    # Slight gaussian blur to reduce noise
+                    processed_img = cv2.GaussianBlur(image_array, (3, 3), 0.5)
+                elif i == 3:
+                    # Histogram equalization
+                    if len(image_array.shape) == 3:
+                        processed_img = cv2.cvtColor(image_array, cv2.COLOR_BGR2YUV)
+                        processed_img[:,:,0] = cv2.equalizeHist(processed_img[:,:,0])
+                        processed_img = cv2.cvtColor(processed_img, cv2.COLOR_YUV2BGR)
+                    else:
+                        processed_img = cv2.equalizeHist(image_array)
+                else:
+                    # Minor rotation and resize variations
+                    h, w = image_array.shape[:2]
+                    center = (w // 2, h // 2)
+                    angle = (-2 + i) * 0.5  # Very small rotations
+                    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+                    processed_img = cv2.warpAffine(image_array, M, (w, h))
+                
+                # Extract embedding
+                embedding, _ = self.extract_face_embedding_hybrid(processed_img)
+                
+                if embedding is not None:
+                    embeddings.append(embedding)
+                    logger.debug(f"Extracted embedding {i+1}/{num_extractions} successfully")
+                
+            logger.info(f"Extracted {len(embeddings)}/{num_extractions} valid embeddings")
+            return embeddings
+            
+        except Exception as e:
+            logger.error(f"Error extracting multiple embeddings: {e}")
+            return []
+
+    def create_robust_face_embedding(self, image_arrays: List[np.ndarray]) -> Optional[np.ndarray]:
+        """
+        Create robust face embedding from multiple images with quality validation
         
         Args:
             image_arrays: List of image arrays containing the same person's face
             
         Returns:
-            Averaged face embedding or None if no valid embeddings found
+            Robust averaged face embedding or None if no valid embeddings found
         """
         try:
-            valid_embeddings = []
+            all_embeddings = []
             
+            # Extract multiple embeddings from each image
             for i, image_array in enumerate(image_arrays):
-                embedding, _ = self.extract_face_embedding(image_array)
-                if embedding is not None:
-                    valid_embeddings.append(embedding)
-                    logger.debug(f"Valid embedding {i+1}/{len(image_arrays)} extracted")
-                else:
-                    logger.debug(f"No embedding found in image {i+1}/{len(image_arrays)}")
+                embeddings = self.extract_multiple_face_embeddings(image_array, num_extractions=3)
+                all_embeddings.extend(embeddings)
+                logger.debug(f"Image {i+1}/{len(image_arrays)} contributed {len(embeddings)} embeddings")
             
-            if not valid_embeddings:
-                logger.warning("No valid face embeddings found in any image")
+            if len(all_embeddings) < 3:
+                logger.warning(f"Only {len(all_embeddings)} embeddings extracted, minimum 3 required")
                 return None
             
-            # Average the embeddings for better accuracy
-            averaged_embedding = np.mean(valid_embeddings, axis=0)
-            logger.info(f"Created averaged face embedding from {len(valid_embeddings)} images")
+            # Convert to numpy array for processing
+            embeddings_array = np.array(all_embeddings)
             
-            return averaged_embedding
+            # Calculate pairwise cosine distances to identify outliers using numpy
+            def cosine_distance_matrix(embeddings):
+                """Calculate cosine distance matrix using numpy"""
+                # Normalize embeddings
+                norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+                normalized_embeddings = embeddings / norms
+                
+                # Calculate cosine similarity matrix
+                similarity_matrix = np.dot(normalized_embeddings, normalized_embeddings.T)
+                
+                # Convert to distance matrix (1 - similarity)
+                distance_matrix = 1 - similarity_matrix
+                return distance_matrix
+            
+            distances = cosine_distance_matrix(embeddings_array)
+            
+            # Calculate mean distance for each embedding to all others
+            mean_distances = np.mean(distances, axis=1)
+            
+            # Remove outliers (embeddings with distance > 1.5 * std from mean)
+            threshold = np.mean(mean_distances) + 1.5 * np.std(mean_distances)
+            valid_indices = mean_distances < threshold
+            
+            filtered_embeddings = embeddings_array[valid_indices]
+            
+            if len(filtered_embeddings) < 2:
+                logger.warning("Too many outliers removed, using all embeddings")
+                filtered_embeddings = embeddings_array
+            
+            # Calculate robust average using median for better outlier resistance
+            robust_embedding = np.median(filtered_embeddings, axis=0)
+            
+            logger.info(f"Created robust embedding from {len(filtered_embeddings)}/{len(all_embeddings)} valid embeddings")
+            
+            return robust_embedding
             
         except Exception as e:
-            logger.error(f"Error creating face embedding from images: {e}")
+            logger.error(f"Error creating robust embedding: {e}")
             return None
+
+    def create_face_embedding_from_images(self, image_arrays: List[np.ndarray]) -> Optional[np.ndarray]:
+        """
+        Create enhanced face embedding from multiple images for better accuracy
+        Now uses robust embedding creation with outlier detection
+        
+        Args:
+            image_arrays: List of image arrays containing the same person's face
+            
+        Returns:
+            Robust averaged face embedding or None if no valid embeddings found
+        """
+        # Use the new robust embedding method
+        return self.create_robust_face_embedding(image_arrays)
     
     def start_background_processing(self):
         """Start background thread for face recognition processing"""
@@ -620,18 +774,30 @@ class DeepFaceRecognitionSystem:
                                 best_name = employee_id
                 
                 # Create result
-                if best_match and best_distance < self.threshold:
+                if best_match and best_distance < self.distance_threshold:  # Use stricter distance_threshold
                     confidence = max(0.0, 1.0 - best_distance)
-                    logger.debug(f"Face recognized in background: {best_name} ({best_match}) with distance {best_distance:.3f}, confidence {confidence:.2f}")
-                    results.append({
-                        'employee_id': best_match,
-                        'name': best_name,
-                        'confidence': confidence,
-                        'position': face_coords or (0, 0, 100, 100)  # Default if no coords
-                    })
+                    
+                    # Additional confidence check - reject low confidence matches
+                    if confidence < 0.75:  # Slightly relaxed from 0.80 to 0.75 for better usability
+                        logger.debug(f"Background recognition confidence too low: {confidence:.2f} < 0.75 for {best_match}")
+                        # Treat as unknown face
+                        results.append({
+                            'employee_id': None,
+                            'name': None,
+                            'confidence': 0.0,
+                            'position': face_coords or (0, 0, 100, 100)
+                        })
+                    else:
+                        logger.debug(f"Face recognized in background: {best_name} ({best_match}) with distance {best_distance:.3f}, confidence {confidence:.2f}")
+                        results.append({
+                            'employee_id': best_match,
+                            'name': best_name,
+                            'confidence': confidence,
+                            'position': face_coords or (0, 0, 100, 100)  # Default if no coords
+                        })
                 else:
                     # Unknown face
-                    logger.debug(f"Unknown face in background - best: {best_match}, distance: {best_distance:.3f}, threshold: {self.threshold}")
+                    logger.debug(f"Unknown face in background - best: {best_match}, distance: {best_distance:.3f}, threshold: {self.distance_threshold}")
                     results.append({
                         'employee_id': None,
                         'name': None,
@@ -681,7 +847,7 @@ class DeepFaceRecognitionSystem:
                                 best_name = employee_id
                 
                 # Create result
-                if best_match and best_distance < self.threshold:
+                if best_match and best_distance < self.distance_threshold:  # Use stricter distance_threshold
                     confidence = max(0.0, 1.0 - best_distance)
                     logger.debug(f"Hybrid recognition: {best_name} ({best_match}) with distance {best_distance:.3f}, confidence {confidence:.2f}")
                     results.append({
@@ -692,7 +858,7 @@ class DeepFaceRecognitionSystem:
                     })
                 else:
                     # Unknown face
-                    logger.debug(f"Unknown face (hybrid) - best: {best_match}, distance: {best_distance:.3f}, threshold: {self.threshold}")
+                    logger.debug(f"Unknown face (hybrid) - best: {best_match}, distance: {best_distance:.3f}, threshold: {self.distance_threshold}")
                     if face_coords:
                         results.append({
                             'employee_id': None,
@@ -742,12 +908,18 @@ class DeepFaceRecognitionSystem:
                     best_match = employee_id
             
             # Check if best match is within threshold
-            if best_match and best_distance < threshold:
+            if best_match and best_distance < self.distance_threshold:  # Use stricter distance_threshold
                 confidence = max(0.0, 1.0 - best_distance)
+                
+                # Additional confidence check - reject low confidence matches
+                if confidence < 0.75:  # Slightly relaxed from 0.80 to 0.75 for better usability
+                    logger.info(f"Recognition confidence too low: {confidence:.2f} < 0.75 for {best_match}")
+                    return None, 0.0
+                
                 logger.info(f"Face recognized: {best_match} with confidence {confidence:.2f}")
                 return best_match, confidence
             else:
-                logger.debug(f"No face match found (best distance: {best_distance:.2f}, threshold: {threshold})")
+                logger.debug(f"No face match found (best distance: {best_distance:.2f}, threshold: {self.distance_threshold})")
                 return None, 0.0
                 
         except Exception as e:

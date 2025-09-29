@@ -6,10 +6,18 @@ A comprehensive attendance tracking system with advanced face recognition, barco
 
 ### Core Functionality
 - **Advanced Face Recognition**: DeepFace with MobileFaceNet for high-accuracy recognition
+- **Multi-Angle Face Capture**: 8-step guided registration process for improved accuracy
 - **Barcode/QR Code Scanning**: Support for employee ID scanning
 - **MongoDB Integration**: Robust database with location-based attendance
 - **Manual Camera Control**: User-activated camera for privacy and control
 - **Confidence Filtering**: Smart threshold system (0.5) with visual feedback
+
+### Telegram Bot Self-Registration
+- **📱 Self-Service Registration**: Employees can register themselves via Telegram
+- **🔄 Multi-Angle Capture**: 8-step guided photo process (neutral, left, right, smile, serious, up, down, final)
+- **🎯 Smart Re-Registration**: Update existing face data with improved vectors
+- **👥 Admin Approval**: Comprehensive approval workflow with capture details
+- **📊 Enhanced Accuracy**: Averaged face vectors from multiple angles for robust recognition
 
 ### User Interface
 - **Modern GUI**: Clean, intuitive interface using CustomTkinter
@@ -152,6 +160,13 @@ Attendance/
 - `+`: Activate camera for face recognition
 - `Esc`: Close dialogs or exit
 
+### Telegram Bot Commands
+- `/start`: Welcome message and bot information
+- `/register`: Start self-registration process
+- `/help`: Show available commands and usage
+- `/status`: Check current registration status
+- **Admin Commands**: Approve/reject registrations via inline buttons
+
 ### Employee Registration
 1. Press `F2` to open registration dialog
 2. Enter employee details (ID, name, department)
@@ -167,6 +182,23 @@ Attendance/
 5. **Recording**: Attendance saved to database
 6. **Completion**: Camera deactivates automatically
 
+### Telegram Bot Self-Registration
+1. **Start Registration**: `/register` command
+2. **Employee ID**: Enter ID (checks for existing users)
+3. **User Details**: Name and role selection
+4. **Multi-Angle Capture**: 8-step guided photo process:
+   - Step 1: Look straight with neutral expression
+   - Step 2: Turn head slightly left
+   - Step 3: Turn head slightly right
+   - Step 4: Look straight and smile
+   - Step 5: Look straight with serious expression
+   - Step 6: Tilt head slightly up
+   - Step 7: Tilt head slightly down
+   - Step 8: Final straight capture
+5. **Processing**: Vectors averaged for accuracy
+6. **Admin Approval**: Notification sent to administrators
+7. **Completion**: Face data stored for attendance
+
 ### Location Management
 - System remembers frequently used locations
 - Favorite locations appear first in dropdown
@@ -181,6 +213,15 @@ Attendance/
 - **Recognition**: Vector similarity matching
 - **Threshold**: 0.5 minimum confidence with visual feedback
 - **Performance**: 60 FPS camera with background processing
+- **Multi-Angle Training**: 8-pose capture for improved accuracy
+
+### Telegram Bot Features
+- **Self-Service Registration**: Employees register independently
+- **Multi-Angle Capture**: 8-step guided photo process
+- **Smart Re-Registration**: Update existing face data
+- **Admin Approval Workflow**: Comprehensive review system
+- **Real-time Validation**: Each pose quality-checked
+- **Progress Tracking**: Step-by-step guidance (X/8 completed)
 
 ### Attendance Modes
 - **CLOCK Mode**: Traditional time tracking with IN/OUT

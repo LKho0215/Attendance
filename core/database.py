@@ -24,6 +24,7 @@ class DatabaseManager:
                     employee_id TEXT UNIQUE NOT NULL,
                     name TEXT NOT NULL,
                     department TEXT,
+                    role TEXT DEFAULT 'Staff',
                     face_image_path TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -50,18 +51,37 @@ class DatabaseManager:
                 # Column already exists
                 pass
             
+            # Add role column if it doesn't exist (for existing databases)
+            try:
+                cursor.execute('ALTER TABLE employees ADD COLUMN role TEXT DEFAULT "Staff"')
+                conn.commit()
+            except sqlite3.OperationalError:
+                # Column already exists
+                pass
+            
+            # Create face_vectors table for storing face embeddings
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS face_vectors (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    employee_id TEXT UNIQUE NOT NULL,
+                    face_vector TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (employee_id) REFERENCES employees (employee_id)
+                )
+            ''')
+            
             conn.commit()
     
-    def add_employee(self, employee_id, name, department=None, face_image_path=None):
+    def add_employee(self, employee_id, name, department=None, role="Staff", face_image_path=None):
         """Add a new employee to the database"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 
                 cursor.execute('''
-                    INSERT INTO employees (employee_id, name, department, face_image_path)
-                    VALUES (?, ?, ?, ?)
-                ''', (employee_id, name, department, face_image_path))
+                    INSERT INTO employees (employee_id, name, department, role, face_image_path)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (employee_id, name, department, role, face_image_path))
                 
                 conn.commit()
                 return True
@@ -73,18 +93,19 @@ class DatabaseManager:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT employee_id, name, department, face_image_path
+                SELECT employee_id, name, department, role, face_image_path
                 FROM employees
                 WHERE employee_id = ?
             ''', (employee_id,))
             
             result = cursor.fetchone()
             if result:
-                employee_id, name, department, face_image_path = result
+                employee_id, name, department, role, face_image_path = result
                 return {
                     'employee_id': employee_id,
                     'name': name,
                     'department': department,
+                    'role': role,
                     'face_image_path': face_image_path
                 }
             return None
@@ -94,12 +115,12 @@ class DatabaseManager:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT employee_id, name, department
+                SELECT employee_id, name, department, role
                 FROM employees
                 ORDER BY name
             ''')
             
-            return [{'employee_id': row[0], 'name': row[1], 'department': row[2]} 
+            return [{'employee_id': row[0], 'name': row[1], 'department': row[2], 'role': row[3]} 
                    for row in cursor.fetchall()]
     
     def get_all_face_images(self):
@@ -197,8 +218,97 @@ class DatabaseManager:
             # Delete attendance records first
             cursor.execute('DELETE FROM attendance WHERE employee_id = ?', (employee_id,))
             
+            # Delete face vector
+            cursor.execute('DELETE FROM face_vectors WHERE employee_id = ?', (employee_id,))
+            
             # Delete employee
             cursor.execute('DELETE FROM employees WHERE employee_id = ?', (employee_id,))
             
             conn.commit()
             return cursor.rowcount > 0
+
+    def add_employee_with_face_vector(self, employee_id, name, face_vector, department=None, role="Staff"):
+        """Add an employee with face vector embedding"""
+        import json
+        
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Add employee to employees table
+                cursor.execute('''
+                    INSERT OR REPLACE INTO employees (employee_id, name, department, role)
+                    VALUES (?, ?, ?, ?)
+                ''', (employee_id, name, department, role))
+                
+                # Add face vector to face_vectors table
+                vector_json = json.dumps(face_vector)
+                cursor.execute('''
+                    INSERT OR REPLACE INTO face_vectors (employee_id, face_vector)
+                    VALUES (?, ?)
+                ''', (employee_id, vector_json))
+                
+                conn.commit()
+                print(f"[DB DEBUG] Employee {employee_id} ({role}) saved with face vector ({len(face_vector)} dimensions)")
+                return True
+                
+        except Exception as e:
+            print(f"[DB ERROR] Failed to save employee with face vector: {e}")
+            return False
+
+    def get_all_face_vectors(self):
+        """Get all employees with their face vectors"""
+        import json
+        
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT e.employee_id, e.name, e.department, e.role, fv.face_vector
+                    FROM employees e
+                    JOIN face_vectors fv ON e.employee_id = fv.employee_id
+                ''')
+                
+                results = []
+                for row in cursor.fetchall():
+                    try:
+                        face_vector = json.loads(row[4])
+                        results.append({
+                            'employee_id': row[0],
+                            'name': row[1],
+                            'department': row[2],
+                            'role': row[3],
+                            'face_vector': face_vector
+                        })
+                    except json.JSONDecodeError as e:
+                        print(f"[DB ERROR] Failed to decode face vector for {row[0]}: {e}")
+                        continue
+                
+                print(f"[DB DEBUG] Loaded {len(results)} employees with face vectors")
+                return results
+                
+        except Exception as e:
+            print(f"[DB ERROR] Failed to load face vectors: {e}")
+            return []
+
+    def update_employee_face_vector(self, employee_id, face_vector):
+        """Update an employee's face vector"""
+        import json
+        
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                vector_json = json.dumps(face_vector)
+                cursor.execute('''
+                    INSERT OR REPLACE INTO face_vectors (employee_id, face_vector)
+                    VALUES (?, ?)
+                ''', (employee_id, vector_json))
+                
+                conn.commit()
+                print(f"[DB DEBUG] Updated face vector for employee {employee_id}")
+                return True
+                
+        except Exception as e:
+            print(f"[DB ERROR] Failed to update face vector: {e}")
+            return False

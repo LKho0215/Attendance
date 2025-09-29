@@ -41,11 +41,18 @@ class AttendanceManager:
         self.test_time_override = None
     
     def determine_shift_and_type(self, employee_id, current_time=None):
-        """Determine shift type and attendance action based on arrival time"""
+        """Determine shift type and attendance action based on arrival time and employee role"""
         if current_time is None:
             current_time = self.get_current_time()
             
         current_time_only = current_time.time()
+        
+        # Get employee information including role
+        employee = self.db.get_employee(employee_id)
+        if not employee:
+            return None, None, None
+            
+        employee_role = employee.get('role', 'Staff')  # Default to Staff if no role specified
         
         # Get today's records for this employee
         today_records = self.get_employee_attendance_today(employee_id)
@@ -58,26 +65,50 @@ class AttendanceManager:
                 break
         
         if clock_in_record:
-            # Employee already clocked in, determine current shift
+            # Employee already clocked in, determine current shift based on role and clock-in time
             clock_in_time = datetime.fromisoformat(clock_in_record['timestamp']).time()
             
-            if clock_in_time < self.EARLY_SHIFT['clock_in_before']:
-                assigned_shift = self.EARLY_SHIFT
+            if employee_role == 'Security':
+                # Security: 7:00 AM - 7:00 PM, no clock-out time restrictions
+                assigned_shift = {
+                    'clock_in_before': time(7, 0),
+                    'clock_out_time': None,  # No restriction for security
+                    'name': 'Security Shift (7:00 AM - 7:00 PM)'
+                }
             else:
-                assigned_shift = self.REGULAR_SHIFT
+                # Staff: Original logic based on clock-in time
+                if clock_in_time < self.EARLY_SHIFT['clock_in_before']:
+                    assigned_shift = self.EARLY_SHIFT
+                else:
+                    assigned_shift = self.REGULAR_SHIFT
             
             # Always allow clock out attempt - let clock_out_employee handle time validation
             return assigned_shift, 'clock', 'out'
         
         else:
-            # First time today - determine shift based on current time
-            if current_time_only < self.EARLY_SHIFT['clock_in_before']:
-                return self.EARLY_SHIFT, 'clock', 'in'
-            elif current_time_only < self.REGULAR_SHIFT['clock_in_before']:
-                return self.REGULAR_SHIFT, 'clock', 'in'
+            # First time today - determine shift based on current time and role
+            if employee_role == 'Security':
+                # Security shift: 7:00 AM - 7:00 PM
+                security_shift = {
+                    'clock_in_before': time(7, 0),
+                    'clock_out_time': None,  # No restriction
+                    'name': 'Security Shift (7:00 AM - 7:00 PM)'
+                }
+                
+                if current_time_only < time(7, 0):
+                    return security_shift, 'clock', 'in'
+                else:
+                    # Allow late clock in for security but mark as late
+                    return security_shift, 'clock', 'in_late'
             else:
-                # Allow late clock in (after 8:00 AM) but mark as late
-                return self.REGULAR_SHIFT, 'clock', 'in_late'
+                # Staff: Original logic
+                if current_time_only < self.EARLY_SHIFT['clock_in_before']:
+                    return self.EARLY_SHIFT, 'clock', 'in'
+                elif current_time_only < self.REGULAR_SHIFT['clock_in_before']:
+                    return self.REGULAR_SHIFT, 'clock', 'in'
+                else:
+                    # Allow late clock in (after 8:00 AM) but mark as late
+                    return self.REGULAR_SHIFT, 'clock', 'in_late'
     
     def process_attendance(self, employee_id, method, attendance_mode, location_callback=None):
         """Process attendance based on mode (clock/check) and current time"""
@@ -113,26 +144,31 @@ class AttendanceManager:
     def clock_in_employee(self, employee_id, method, shift, is_late=False):
         """Clock in employee for shift start"""
         employee = self.db.get_employee(employee_id)
+        employee_role = employee.get('role', 'Staff')
         
         # Check if already clocked in today
         today_records = self.get_employee_attendance_today(employee_id)
         for record in today_records:
             if record.get('attendance_type') == 'clock' and record['status'] == 'in':
-                return False, f"{employee['name']} is already clocked in for {shift['name']}"
+                return False, f"{employee['name']} ({employee_role}) is already clocked in for {shift['name']}"
         
         # Record clock-in with late flag
         current_time = self.get_current_time()
         record_id = self.db.record_attendance(employee_id, method, "in", "clock", current_time, late=is_late)
         
-        # Return appropriate message
+        # Return appropriate message based on role and timing
         if is_late:
-            return True, f"{employee['name']} LATE clock in (after 8:00 AM)"
+            if employee_role == 'Security':
+                return True, f"{employee['name']} (Security) LATE clock in (after 7:00 AM)"
+            else:
+                return True, f"{employee['name']} (Staff) LATE clock in (after 8:00 AM)"
         else:
-            return True, f"{employee['name']} clocked in for {shift['name']}"
+            return True, f"{employee['name']} ({employee_role}) clocked in for {shift['name']}"
     
     def clock_out_employee(self, employee_id, method, shift):
-        """Clock out employee for shift end with time restrictions"""
+        """Clock out employee for shift end with role-based time restrictions"""
         employee = self.db.get_employee(employee_id)
+        employee_role = employee.get('role', 'Staff')
         
         # Check if clocked in today and get clock-in record
         today_records = self.get_employee_attendance_today(employee_id)
@@ -143,37 +179,43 @@ class AttendanceManager:
                 break
         
         if not clock_in_record:
-            return False, f"{employee['name']} hasn't clocked in today"
+            return False, f"{employee['name']} ({employee_role}) hasn't clocked in today"
         
         # Check if already clocked out
         for record in today_records:
             if record.get('attendance_type') == 'clock' and record['status'] == 'out':
-                return False, f"{employee['name']} is already clocked out"
+                return False, f"{employee['name']} ({employee_role}) is already clocked out"
         
-        # Check clock-out time restrictions based on clock-in time
+        # Role-based clock-out time restrictions
         current_time = self.get_current_time()
         current_time_only = current_time.time()
         
-        # Get clock-in time from the record
-        from datetime import datetime
-        clock_in_time = datetime.fromisoformat(clock_in_record['timestamp']).time()
-        
-        # Determine minimum clock-out time based on clock-in time
-        if clock_in_time < time(8, 0):  # Clocked in before 8:00 AM
-            min_clock_out_time = time(17, 0)  # 5:00 PM
-            shift_name = "Early Shift"
-        else:  # Clocked in at 8:00 AM or later (including late arrivals)
-            min_clock_out_time = time(17, 15)  # 5:15 PM
-            shift_name = "Regular Shift"
-        
-        # Check if current time is before minimum clock-out time
-        if current_time_only < min_clock_out_time:
-            min_time_str = min_clock_out_time.strftime("%I:%M %p")
-            return False, f"Cannot clock out before {min_time_str} ({shift_name})"
-        
-        # Record clock-out
-        record_id = self.db.record_attendance(employee_id, method, "out", "clock", current_time)
-        return True, f"{employee['name']} clocked out from {shift_name}"
+        if employee_role == 'Security':
+            # Security: No clock-out time restrictions as per requirements
+            record_id = self.db.record_attendance(employee_id, method, "out", "clock", current_time)
+            return True, f"{employee['name']} (Security) clocked out from Security Shift"
+        else:
+            # Staff: Apply original time restrictions
+            # Get clock-in time from the record
+            from datetime import datetime
+            clock_in_time = datetime.fromisoformat(clock_in_record['timestamp']).time()
+            
+            # Determine minimum clock-out time based on clock-in time
+            if clock_in_time < time(8, 0):  # Clocked in before 8:00 AM
+                min_clock_out_time = time(17, 0)  # 5:00 PM
+                shift_name = "Early Shift"
+            else:  # Clocked in at 8:00 AM or later (including late arrivals)
+                min_clock_out_time = time(17, 15)  # 5:15 PM
+                shift_name = "Regular Shift"
+            
+            # Check if current time is before minimum clock-out time
+            if current_time_only < min_clock_out_time:
+                min_time_str = min_clock_out_time.strftime("%I:%M %p")
+                return False, f"Cannot clock out before {min_time_str} ({shift_name})"
+            
+            # Record clock-out
+            record_id = self.db.record_attendance(employee_id, method, "out", "clock", current_time)
+            return True, f"{employee['name']} (Staff) clocked out from {shift_name}"
     
     def toggle_check_attendance(self, employee_id, method, location_callback=None):
         """Toggle check in/out for office entry/exit during work hours"""

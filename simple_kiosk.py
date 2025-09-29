@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""
-Simple Kiosk Mode Attendance System
-Optimized for keyboard and touch operation without mouse
-No external audio dependencies
-"""
-
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import messagebox
@@ -18,7 +12,6 @@ import ctypes
 import re
 import numpy as np
 import traceback
-import psutil  # For CPU monitoring
 from datetime import datetime, timedelta
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -28,7 +21,7 @@ from core.deepface_recognition import DeepFaceRecognitionSystem, CameraManager
 from core.barcode_scanner import BarcodeScanner
 from core.attendance import AttendanceManager
 from core.mongo_location_manager import MongoLocationManager
-from core.location_selector import LocationSelector
+from core.attendance_ultra_light import AttendanceUltraLightDetector
 
 # Set appearance mode and color theme2
 ctk.set_appearance_mode("dark")
@@ -37,65 +30,8 @@ ctk.set_default_color_theme("blue")
 # Configuration constants
 CONFIDENCE_THRESHOLD = 0.6  # Minimum confidence required for face recognition
 
-class CPUMonitor:
-    """Monitor CPU usage and log performance metrics"""
-    def __init__(self):
-        self.process = psutil.Process()
-        self.last_log_time = 0
-        self.log_interval = 5  # Log every 5 seconds
-        self.high_cpu_threshold = 80  # Log if CPU > 80%
-        self.cpu_history = []
-        
-    def log_cpu_usage(self, context="General"):
-        """Log CPU usage if significant or at regular intervals"""
-        current_time = time.time()
-        
-        # Get CPU usage
-        cpu_percent = psutil.cpu_percent(interval=0.1)
-        process_cpu = self.process.cpu_percent()
-        memory_info = self.process.memory_info()
-        memory_mb = memory_info.rss / 1024 / 1024
-        
-        # Store in history for analysis
-        self.cpu_history.append({
-            'time': current_time,
-            'context': context,
-            'cpu_percent': cpu_percent,
-            'process_cpu': process_cpu,
-            'memory_mb': memory_mb
-        })
-        
-        # Keep only last 100 entries
-        if len(self.cpu_history) > 100:
-            self.cpu_history = self.cpu_history[-100:]
-        
-        # Log if high CPU or at regular intervals
-        should_log = (current_time - self.last_log_time > self.log_interval) or (cpu_percent > self.high_cpu_threshold)
-        
-        if should_log:
-            print(f"[CPU MONITOR] {context}: CPU={cpu_percent:.1f}%, Process CPU={process_cpu:.1f}%, Memory={memory_mb:.1f}MB")
-            self.last_log_time = current_time
-            
-        return cpu_percent, process_cpu, memory_mb
-    
-    def get_cpu_summary(self):
-        """Get CPU usage summary from history"""
-        if not self.cpu_history:
-            return "No CPU data available"
-        
-        recent_data = self.cpu_history[-20:]  # Last 20 measurements
-        avg_cpu = sum(d['cpu_percent'] for d in recent_data) / len(recent_data)
-        max_cpu = max(d['cpu_percent'] for d in recent_data)
-        avg_memory = sum(d['memory_mb'] for d in recent_data) / len(recent_data)
-        
-        return f"CPU Summary: Avg={avg_cpu:.1f}%, Max={max_cpu:.1f}%, Memory={avg_memory:.1f}MB"
-
 class SimpleKioskApp:
     def __init__(self):
-        # Initialize CPU monitor first
-        self.cpu_monitor = CPUMonitor()
-        self.cpu_monitor.log_cpu_usage("App Initialization Start")
-        
         # Make application DPI-aware (must be done before creating tkinter window)
         try:
             import ctypes
@@ -113,7 +49,6 @@ class SimpleKioskApp:
         
         # Initialize core components
         print("[INIT DEBUG] Initializing core components...")
-        self.cpu_monitor.log_cpu_usage("Before Core Components")
         try:
             self.db = MongoDBManager()
             print("[INIT DEBUG] MongoDB manager initialized")
@@ -130,15 +65,31 @@ class SimpleKioskApp:
                                f"Failed to connect to MongoDB:\n{e}\n\nPlease check your mongo_config.py file.")
             return
         
-        # Initialize face recognition with MTCNN for better detection
-        self.face_recognition = DeepFaceRecognitionSystem(detector_backend='mtcnn')
-        print("[INIT DEBUG] DeepFace recognition system initialized")
+        # Face detection method configuration
+        self.use_ultra_light_detection = True  # Set to True for ultra-fast detection, False for DeepFace
         
-        # Start background face processing
-        self.face_recognition.start_background_processing()
-        print("[INIT DEBUG] Background face processing started")
+        if self.use_ultra_light_detection:
+            # Initialize Ultra Light Face Detection for maximum performance
+            print("[INIT DEBUG] Initializing Ultra Light Face Detection...")
+            self.ultra_light_detector = AttendanceUltraLightDetector(confidence_threshold=0.7)
+            print("[INIT DEBUG] Ultra Light Face Detection initialized")
+            
+            # Still keep face recognition for enrollment/verification if needed
+            self.face_recognition = DeepFaceRecognitionSystem(detector_backend='mtcnn')
+            print("[INIT DEBUG] DeepFace recognition system initialized (backup)")
+        else:
+            # Use traditional DeepFace system
+            self.face_recognition = DeepFaceRecognitionSystem(detector_backend='mtcnn')
+            print("[INIT DEBUG] DeepFace recognition system initialized")
+            
+            # Start background face processing
+            self.face_recognition.start_background_processing()
+            print("[INIT DEBUG] Background face processing started")
+            
+            self.ultra_light_detector = None
         
         self.camera_manager = CameraManager()
+        print("[INIT DEBUG] Camera manager initialized")
         print("[INIT DEBUG] Camera manager initialized")
         
         self.barcode_scanner = BarcodeScanner()
@@ -808,6 +759,28 @@ class SimpleKioskApp:
             self.reg_department = tk.Entry(form_frame, font=("Arial", 12), width=18)
             self.reg_department.grid(row=3, column=1, padx=10, pady=10)
             
+            # Role Selection
+            tk.Label(form_frame, text="Role:", font=("Arial", 12, "bold"),
+                    bg='#f0f8ff', fg='#2E86C1').grid(row=4, column=0, sticky="e", padx=10, pady=10)
+            
+            # Create role dropdown
+            self.reg_role_var = tk.StringVar(value="Staff")
+            role_frame = tk.Frame(form_frame, bg='#f0f8ff')
+            role_frame.grid(row=4, column=1, padx=10, pady=10, sticky="w")
+            
+            role_options = ["Staff", "Security"]
+            self.reg_role_menu = tk.OptionMenu(role_frame, self.reg_role_var, *role_options)
+            self.reg_role_menu.config(
+                font=("Arial", 11),
+                bg='white',
+                fg='#2E86C1',
+                width=15,
+                borderwidth=1,
+                relief="solid"
+            )
+            self.reg_role_menu.pack(side="left")
+            
+            
             # Status label
             self.reg_status_label = tk.Label(
                 form_frame,
@@ -817,7 +790,7 @@ class SimpleKioskApp:
                 fg='#666666',
                 wraplength=320
             )
-            self.reg_status_label.grid(row=4, column=0, columnspan=2, pady=15)
+            self.reg_status_label.grid(row=5, column=0, columnspan=2, pady=15)
             
             # Camera preview setup
             camera_title = tk.Label(
@@ -838,17 +811,6 @@ class SimpleKioskApp:
                 fg='white'
             )
             self.reg_camera_label.pack(pady=10)
-            
-            # Face detection info
-            face_info = tk.Label(
-                camera_frame,
-                text="🎯 Green boxes will show detected faces\n📊 Face vectors are captured in real-time",
-                font=("Arial", 10),
-                bg='#f0f8ff',
-                fg='#666666',
-                justify="center"
-            )
-            face_info.pack(pady=5)
             
             # Buttons frame (at bottom)
             button_frame = tk.Frame(dialog, bg='#f0f8ff')
@@ -876,7 +838,7 @@ class SimpleKioskApp:
                 fg='white',
                 width=20,
                 height=2,
-                command=lambda: self.close_registration_dialog(dialog)
+                command=dialog.destroy
             )
             cancel_btn.pack(side="left", padx=10)
             
@@ -959,6 +921,7 @@ class SimpleKioskApp:
             employee_id = self.reg_employee_id.get().strip()
             employee_name = self.reg_employee_name.get().strip()
             department = self.reg_department.get().strip()
+            role = self.reg_role_var.get()  # Get selected role
             
             if not employee_id or not employee_name or not department:
                 self.reg_status_label.configure(
@@ -1004,6 +967,7 @@ class SimpleKioskApp:
             self.reg_employee_id.configure(state='disabled')
             self.reg_employee_name.configure(state='disabled')
             self.reg_department.configure(state='disabled')
+            self.reg_role_menu.configure(state='disabled')
             self.capture_btn.configure(state='disabled', text="📷 CAPTURING...")
             
             # Start camera preview for registration
@@ -1011,7 +975,7 @@ class SimpleKioskApp:
             self.start_registration_camera_preview()
             
             # Start actual capture process after a short delay
-            dialog.after(2000, lambda: self.start_face_capture_process(employee_id, employee_name, department, dialog))
+            dialog.after(2000, lambda: self.start_face_capture_process(employee_id, employee_name, department, role, dialog))
             
         except Exception as e:
             print(f"[REG DEBUG] Error starting face capture: {e}")
@@ -1023,6 +987,7 @@ class SimpleKioskApp:
                 self.reg_employee_id.configure(state='normal')
                 self.reg_employee_name.configure(state='normal')
                 self.reg_department.configure(state='normal')
+                self.reg_role_menu.configure(state='normal')
                 self.capture_btn.configure(state='normal', text="📷 START FACE CAPTURE")
             except:
                 pass
@@ -1050,31 +1015,81 @@ class SimpleKioskApp:
                 if ret and frame is not None:
                     # Create a copy for drawing
                     display_frame = frame.copy()
+                    height, width = frame.shape[:2]
+                    display_width, display_height = 480, 360
                     
-                    # Use pure DeepFace for preview (with frame skipping for performance)
-                    try:
-                        # Submit frame for background processing (will be skipped if processing is busy)
-                        self.face_recognition.submit_frame_for_processing(frame)
+                    # Use ultra light detection for fast real-time feedback
+                    detected_faces = []
+                    if hasattr(self, 'ultra_light_detector') and self.ultra_light_detector:
+                        try:
+                            detected_faces = self.ultra_light_detector.detect_faces_for_attendance(frame)
+                            print(f"[REG ULTRA] Detected {len(detected_faces) if detected_faces else 0} faces in registration")
+                        except Exception as ultra_error:
+                            print(f"[REG ULTRA] Ultra light detection error: {ultra_error}")
+                    
+                    # Draw face detection results
+                    if detected_faces:
+                        # Get the best face for registration
+                        best_face = self.ultra_light_detector.get_best_face(detected_faces)
                         
-                        # Get latest results for preview
-                        detection_results = self.face_recognition.get_latest_results()
+                        for face_data in detected_faces:
+                            x1, y1, x2, y2 = face_data['bbox']
+                            confidence = face_data['confidence']
+                            
+                            # Scale coordinates to display frame
+                            display_x1 = int(x1 * display_width / width)
+                            display_y1 = int(y1 * display_height / height)
+                            display_x2 = int(x2 * display_width / width)
+                            display_y2 = int(y2 * display_height / height)
+                            
+                            # Determine if this is the best face
+                            is_best = best_face and face_data['id'] == best_face['id']
+                            
+                            # Color coding - green for good detection, yellow for others
+                            if confidence > 0.7 and is_best:
+                                color = (0, 255, 0)  # Green for good quality
+                                label = f"GOOD QUALITY ({confidence:.2f})"
+                                thickness = 3
+                            elif is_best:
+                                color = (0, 255, 255)  # Yellow for acceptable
+                                label = f"FACE DETECTED ({confidence:.2f})"
+                                thickness = 2
+                            else:
+                                color = (255, 255, 0)  # Light blue for other faces
+                                label = f"Other Face ({confidence:.2f})"
+                                thickness = 1
+                            
+                            # Draw bounding box
+                            cv2.rectangle(display_frame, (display_x1, display_y1), (display_x2, display_y2), color, thickness)
+                            
+                            # Draw label with background
+                            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
+                            cv2.rectangle(display_frame, 
+                                         (display_x1, display_y1 - label_size[1] - 10), 
+                                         (display_x1 + label_size[0], display_y1), 
+                                         color, -1)
+                            cv2.putText(display_frame, label, (display_x1, display_y1 - 5), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
                         
-                        if detection_results:
-                            # Draw face boxes with DeepFace results
-                            display_frame = self.face_recognition.draw_face_boxes_from_results(display_frame, detection_results)
-                        else:
-                            # No faces detected - add instruction text
-                            cv2.putText(display_frame, "POSITION FACE IN FRAME", (30, 40), 
-                                      cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                    except Exception as face_error:
-                        print(f"[REG DEBUG] Face detection error: {face_error}")
-                        # Continue with frame display even if face detection fails
-                        cv2.putText(display_frame, "FACE DETECTION ERROR", (30, 40), 
+                        # Add instruction text at bottom
+                        cv2.putText(display_frame, "FACE DETECTED - READY FOR CAPTURE", (30, display_height - 20), 
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    else:
+                        # No faces detected - add instruction text
+                        cv2.putText(display_frame, "POSITION FACE IN FRAME", (30, 40), 
                                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                        cv2.putText(display_frame, "Look directly at the camera", (30, display_height - 20), 
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1)
+                    
+                    # Add FPS indicator
+                    if hasattr(self, 'ultra_light_detector') and self.ultra_light_detector:
+                        fps = self.ultra_light_detector.get_performance_stats()['fps']
+                        cv2.putText(display_frame, f"FPS: {fps:.1f}", (display_width - 100, 30), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
                     
                     try:
                         # Resize and convert for display - larger size for better visibility
-                        display_frame = cv2.resize(display_frame, (480, 360))  # Much larger preview
+                        display_frame = cv2.resize(display_frame, (display_width, display_height))
                         display_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
                         
                         # Convert to PhotoImage
@@ -1109,10 +1124,10 @@ class SimpleKioskApp:
                 except:
                     self.reg_camera_active = False
     
-    def start_face_capture_process(self, employee_id, employee_name, department, dialog):
+    def start_face_capture_process(self, employee_id, employee_name, department, role, dialog):
         """Start the actual face capture process"""
         try:
-            print(f"[REG DEBUG] Starting face capture process for {employee_id}")
+            print(f"[REG DEBUG] Starting face capture process for {employee_id} ({role})")
             
             # Validate that we still have camera access
             if not hasattr(self, 'camera_manager') or not self.camera_manager or not self.camera_manager.cap:
@@ -1134,7 +1149,7 @@ class SimpleKioskApp:
             try:
                 capture_thread = threading.Thread(
                     target=self.capture_face_vectors_with_preview,
-                    args=(employee_id, employee_name, department, dialog),
+                    args=(employee_id, employee_name, department, role, dialog),
                     daemon=True
                 )
                 capture_thread.start()
@@ -1218,87 +1233,272 @@ class SimpleKioskApp:
             )
     
     def capture_face_vectors(self, employee_id, employee_name, department, dialog):
-        """Capture multiple face images and create face vectors"""
+        """Capture multiple face images and create face vectors with visual feedback"""
         try:
-            print(f"[REG DEBUG] Starting face capture for {employee_id}")
+            print(f"[REG DEBUG] Starting enhanced face capture for {employee_id}")
             
+            captured_frames = []  # Store frames for robust embedding creation
             captured_vectors = []
             capture_count = 0
-            max_captures = 12  # Capture 12 face vectors for good accuracy
-            capture_duration = 4  # 4 seconds total capture time
+            max_captures = 15  # Increased to capture more frames for better quality
+            capture_duration = 5  # 5 seconds total capture time
+            min_face_size = 60  # Minimum face size for quality
             
             start_time = time.time()
+            
+            # Temporarily stop the preview to show capture feedback
+            original_preview_state = self.reg_camera_active
+            self.reg_camera_active = False
             
             while capture_count < max_captures and (time.time() - start_time) < capture_duration:
                 if hasattr(self, 'camera_manager') and self.camera_manager.cap is not None:
                     ret, frame = self.camera_manager.cap.read()
                     
                     if ret and frame is not None:
-                        # Try to detect and encode face using hybrid approach
-                        face_vector, face_coords = self.face_recognition.extract_face_embedding_hybrid(frame)
+                        # Create display frame for visual feedback
+                        display_frame = frame.copy()
+                        height, width = frame.shape[:2]
+                        display_width, display_height = 480, 360
                         
-                        if face_vector is not None:
-                            captured_vectors.append(face_vector)
+                        # Try to detect and validate face quality using ultra light detection
+                        face_quality_good = False
+                        best_face_data = None
+                        
+                        if hasattr(self, 'ultra_light_detector') and self.ultra_light_detector:
+                            try:
+                                detected_faces = self.ultra_light_detector.detect_faces_for_attendance(frame)
+                                if detected_faces:
+                                    face_detected = True
+                                    best_face = self.ultra_light_detector.get_best_face(detected_faces)
+                                    
+                                    if best_face:
+                                        best_face_data = best_face
+                                        x1, y1, x2, y2 = best_face['bbox']
+                                        face_width = x2 - x1
+                                        face_height = y2 - y1
+                                        confidence = best_face['confidence']
+                                        
+                                        # Quality checks
+                                        if (face_width >= min_face_size and 
+                                            face_height >= min_face_size and 
+                                            confidence >= 0.8 and
+                                            face_width < width * 0.8 and  # Not too large (too close)
+                                            face_height < height * 0.8):
+                                            face_quality_good = True
+                                    
+                                    # Draw detection box
+                                    for face_data in detected_faces:
+                                        x1, y1, x2, y2 = face_data['bbox']
+                                        confidence = face_data['confidence']
+                                        is_best = best_face and face_data['id'] == best_face['id']
+                                        
+                                        # Scale coordinates to display frame
+                                        display_x1 = int(x1 * display_width / width)
+                                        display_y1 = int(y1 * display_height / height)
+                                        display_x2 = int(x2 * display_width / width)
+                                        display_y2 = int(y2 * display_height / height)
+                                        
+                                        # Color coding for capture feedback
+                                        if face_quality_good and is_best:
+                                            color = (0, 255, 0)  # Green for high quality
+                                            thickness = 3
+                                        elif is_best:
+                                            color = (0, 255, 255)  # Yellow for medium quality
+                                            thickness = 2
+                                        else:
+                                            color = (0, 165, 255)  # Orange for detected faces
+                                            thickness = 1
+                                        
+                                        # Draw bounding box
+                                        cv2.rectangle(display_frame, (display_x1, display_y1), (display_x2, display_y2), color, thickness)
+                                        
+                                        # Show quality and vectorization status
+                                        if is_best:
+                                            if face_quality_good:
+                                                label = f"HIGH QUALITY - CAPTURING {capture_count}/{max_captures}"
+                                            else:
+                                                label = f"ADJUSTING POSITION..."
+                                            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+                                            cv2.rectangle(display_frame, 
+                                                         (display_x1, display_y1 - label_size[1] - 15), 
+                                                         (display_x1 + label_size[0], display_y1), 
+                                                         color, -1)
+                                            cv2.putText(display_frame, label, (display_x1, display_y1 - 5), 
+                                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+                            except Exception as ultra_error:
+                                print(f"[REG CAPTURE] Ultra detection error: {ultra_error}")
+                        
+                        # Capture frame if quality is good
+                        if face_quality_good and len(captured_frames) < max_captures:
+                            captured_frames.append(frame.copy())
                             capture_count += 1
                             
+                            # Show success feedback on display
+                            cv2.putText(display_frame, f"✓ FRAME {capture_count} CAPTURED!", (30, display_height - 40), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                            
                             # Update status on UI thread
-                            progress_text = f"📷 Capturing faces... {capture_count}/{max_captures} captured"
+                            progress_text = f"📸 Capturing frames... {capture_count}/{max_captures} high-quality frames captured"
                             self.root.after(0, lambda: self.reg_status_label.configure(
                                 text=progress_text, fg='green'
                             ))
                             
-                            print(f"[REG DEBUG] Captured face {capture_count}/{max_captures}")
+                            print(f"[REG DEBUG] Captured high-quality frame {capture_count}/{max_captures}")
                             
-                            # Small delay between captures
+                            # Small delay between captures to get different poses
                             time.sleep(0.2)
+                        else:
+                            # Provide feedback on why frame wasn't captured
+                            if not face_detected:
+                                feedback = "NO FACE DETECTED"
+                                color = (0, 0, 255)  # Red
+                            elif not face_quality_good:
+                                feedback = "ADJUSTING FOR BETTER QUALITY..."
+                                color = (0, 255, 255)  # Yellow
+                            else:
+                                feedback = f"ENOUGH FRAMES CAPTURED ({capture_count})"
+                                color = (0, 255, 0)  # Green
+                                
+                            cv2.putText(display_frame, feedback, (30, display_height - 40), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                        
+                        # Add progress bar
+                        progress_width = int((capture_count / max_captures) * (display_width - 60))
+                        cv2.rectangle(display_frame, (30, display_height - 20), (display_width - 30, display_height - 10), (100, 100, 100), -1)
+                        if progress_width > 0:
+                            cv2.rectangle(display_frame, (30, display_height - 20), (30 + progress_width, display_height - 10), (0, 255, 0), -1)
+                        
+                        # Update camera display with capture feedback
+                        try:
+                            display_frame = cv2.resize(display_frame, (display_width, display_height))
+                            display_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+                            
+                            from PIL import Image, ImageTk
+                            image = Image.fromarray(display_frame)
+                            photo = ImageTk.PhotoImage(image)
+                            
+                            if hasattr(self, 'reg_camera_label') and self.reg_camera_label.winfo_exists():
+                                self.reg_camera_label.configure(image=photo)
+                                self.reg_camera_label.image = photo
+                        except Exception as display_error:
+                            print(f"[REG CAPTURE] Display error: {display_error}")
+                        
+                        # Small delay between captures
+                        time.sleep(0.2)
                 
                 time.sleep(0.1)  # Small delay to prevent excessive CPU usage
             
-            # Process results
-            if len(captured_vectors) >= 3:  # Need at least 3 good captures
-                # Calculate average vector for better accuracy
-                import numpy as np
-                avg_vector = np.mean(captured_vectors, axis=0)
+            # Restore preview state
+            self.reg_camera_active = original_preview_state
+            
+            # Process captured frames to create robust embedding
+            if len(captured_frames) >= 5:  # Need at least 5 good quality frames
+                # Update status to show processing
+                self.root.after(0, lambda: self.reg_status_label.configure(
+                    text=f"🧠 Creating robust face embedding from {len(captured_frames)} frames...",
+                    fg='blue'
+                ))
                 
-                # Save employee to database
-                success = self.db.add_employee_with_face_vector(
-                    employee_id=employee_id,
-                    name=employee_name,
-                    face_vector=avg_vector.tolist(),
-                    department=department
-                )
+                # Create robust embedding using the enhanced method
+                robust_embedding = self.face_recognition.create_robust_face_embedding(captured_frames)
                 
-                if success:
-                    # Update status on UI thread
+                if robust_embedding is not None:
+                    # Update status to show database saving
                     self.root.after(0, lambda: self.reg_status_label.configure(
-                        text=f"✅ Employee registered successfully! ({len(captured_vectors)} faces captured)",
-                        fg='green'
+                        text=f"💾 Saving to database... (robust embedding from {len(captured_frames)} frames)",
+                        fg='blue'
                     ))
                     
-                    print(f"[REG DEBUG] Employee {employee_id} registered with {len(captured_vectors)} face vectors")
+                    # Save employee to database
+                    success = self.db.add_employee_with_face_vector(
+                        employee_id=employee_id,
+                        name=employee_name,
+                        face_vector=robust_embedding.tolist(),
+                        department=department
+                    )
                     
-                    # Close dialog after 2 seconds
-                    self.root.after(2000, dialog.destroy)
-                    
-                    # Show success message
-                    self.root.after(100, lambda: self.show_success_message(
-                        f"👤 Employee {employee_name} registered successfully!"
-                    ))
-                    
-                    # Reload face recognition data
-                    self.root.after(500, self.load_known_faces)
-                    
+                    if success:
+                        # Update status on UI thread
+                        self.root.after(0, lambda: self.reg_status_label.configure(
+                            text=f"✅ Employee registered successfully! (ArcFace robust embedding from {len(captured_frames)} frames)",
+                            fg='green'
+                        ))
+                        
+                        print(f"[REG DEBUG] Employee {employee_id} registered with robust ArcFace embedding from {len(captured_frames)} frames")
+                        
+                        # Close dialog after 3 seconds
+                        self.root.after(3000, dialog.destroy)
+                        
+                        # Show success message
+                        self.root.after(100, lambda: self.show_success_message(
+                            f"👤 Employee {employee_name} registered successfully with high-accuracy ArcFace embedding!"
+                        ))
+                        
+                        # Reload face recognition data
+                        self.root.after(500, self.load_known_faces)
+                        
+                    else:
+                        self.root.after(0, lambda: self.reg_status_label.configure(
+                            text="❌ Database error - failed to save employee",
+                            fg='red'
+                        ))
                 else:
                     self.root.after(0, lambda: self.reg_status_label.configure(
-                        text="❌ Database error - failed to save employee",
+                        text="❌ Failed to create face embedding - please try again",
                         fg='red'
                     ))
             else:
-                # Not enough faces captured
+                # Not enough high-quality frames captured
                 self.root.after(0, lambda: self.reg_status_label.configure(
-                    text=f"❌ Could not capture enough face data ({len(captured_vectors)}/3 minimum). Try again.",
+                    text=f"❌ Could not capture enough high-quality frames ({len(captured_frames)}/5 minimum). Please try again.",
                     fg='red'
                 ))
+            
+            # Re-enable form on UI thread
+            self.root.after(0, lambda: [
+                self.reg_employee_id.configure(state='normal'),
+                self.reg_employee_name.configure(state='normal'),
+                self.reg_department.configure(state='normal'),
+                self.capture_btn.configure(state='normal', text="📷 START FACE CAPTURE")
+            ])
+                
+        except Exception as e:
+            print(f"[REG DEBUG] Error during face capture: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Restore preview state
+            if 'original_preview_state' in locals():
+                self.reg_camera_active = original_preview_state
+            
+            # Show error on UI thread
+            self.root.after(0, lambda: self.reg_status_label.configure(
+                text=f"❌ Capture failed: {str(e)}",
+                fg='red'
+            ))
+            
+            # Re-enable form on UI thread
+            self.root.after(0, lambda: [
+                self.reg_employee_id.configure(state='normal'),
+                self.reg_employee_name.configure(state='normal'),
+                self.reg_department.configure(state='normal'),
+                self.capture_btn.configure(state='normal', text="📷 START FACE CAPTURE")
+            ])
+                
+        except Exception as e:
+            print(f"[REG DEBUG] Error during face capture: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Restore preview state
+            if 'original_preview_state' in locals():
+                self.reg_camera_active = original_preview_state
+            
+            # Show error on UI thread
+            self.root.after(0, lambda: self.reg_status_label.configure(
+                text=f"❌ Capture failed: {str(e)}",
+                fg='red'
+            ))
             
             # Re-enable form on UI thread
             self.root.after(0, lambda: [
@@ -1327,14 +1527,11 @@ class SimpleKioskApp:
                 self.capture_btn.configure(state='normal', text="📷 START FACE CAPTURE")
             ])
     
-    def capture_face_vectors_with_preview(self, employee_id, employee_name, department, dialog):
+    def capture_face_vectors_with_preview(self, employee_id, employee_name, department, role, dialog):
         """Improved face capture with guided instructions for better accuracy"""
         try:
             import numpy as np
-            print(f"[IMPROVED REG] Starting guided face capture for {employee_id}")
-            
-            # Monitor CPU usage at start
-            self.cpu_monitor.log_cpu_usage("Improved Registration Start")
+            print(f"[IMPROVED REG] Starting guided face capture for {employee_id} ({role})")
             
             # Pause background processing
             print("[IMPROVED REG] Pausing background face processing during registration")
@@ -1489,11 +1686,12 @@ class SimpleKioskApp:
                         employee_id=employee_id,
                         name=employee_name,
                         face_vector=weighted_avg.tolist(),
-                        department=department
+                        department=department,
+                        role=role
                     )
                     
                     if success:
-                        print(f"[IMPROVED REG] Employee {employee_id} registered successfully with {len(captured_vectors)} diverse face vectors")
+                        print(f"[IMPROVED REG] Employee {employee_id} ({role}) registered successfully with {len(captured_vectors)} diverse face vectors")
                         
                         # Update success status
                         vector_count = len(captured_vectors)
@@ -2021,13 +2219,13 @@ class SimpleKioskApp:
         employee_id = self.personal_id_entry.get().strip()
         
         if not employee_id:
-            self.show_temp_message("Please enter Employee ID!", "red")
+            self.show_temp_message("Please enter Employee ID!", "red", parent_dialog=dialog)
             return
         
         # Check if employee exists
         employee = self.db.get_employee(employee_id)
         if not employee:
-            self.show_temp_message("Employee not found!", "red")
+            self.show_temp_message("Employee not found!", "red", parent_dialog=dialog)
             return
         
         # Close dialog and disable scanning
@@ -2568,7 +2766,14 @@ class SimpleKioskApp:
             self.update_group_employee_display()
             print(f"[GROUP DEBUG] Removed employee: {removed_emp['name']} ({removed_emp['employee_id']})")
     
-    def show_temp_message(self, message, color):
+    def show_temp_message(self, message, color, parent_dialog=None):
+
+        if parent_dialog is not None:
+            try:
+                parent_dialog.destroy()
+            except:
+                pass
+    
         """Show a temporary message dialog"""
         dialog = tk.Toplevel(self.root)
         dialog.title("Information")
@@ -2610,6 +2815,8 @@ class SimpleKioskApp:
         # Bind Enter and Escape keys
         dialog.bind('<Return>', lambda e: dialog.destroy())
         dialog.bind('<Escape>', lambda e: dialog.destroy())
+
+        dialog.focus_set()
         
         # Auto-close after 3 seconds
         dialog.after(3000, dialog.destroy)
@@ -2617,7 +2824,7 @@ class SimpleKioskApp:
     def proceed_group_location_selection(self, dialog):
         """Proceed to location selection for the group"""
         if not self.group_employees:
-            self.show_temp_message("Please add at least one employee!", "red")
+            self.show_temp_message("Add at least one employee!", "red")
             return
         
         # Close the group dialog
@@ -2714,7 +2921,9 @@ class SimpleKioskApp:
             print(f"[CONFIRMATION DEBUG] Camera turned OFF after QR recognition")
             
             # Create confirmation dialog using messagebox for reliability
-            message = f"QR Code Recognition Confirmation\n\nScanned: {employee['name']}\nEmployee ID: {employee['employee_id']}\nQR Data: {qr_code.get('data', 'N/A')}\n\nIs this scan correct?"
+            employee_role = employee.get('role', 'Staff')
+            role_icon = '🛡️' if employee_role == 'Security' else '👥'
+            message = f"QR Code Recognition Confirmation\n\nScanned: {employee['name']}\nEmployee ID: {employee['employee_id']}\nRole: {role_icon} {employee_role}\nQR Data: {qr_code.get('data', 'N/A')}\n\nIs this scan correct?"
             
             print(f"[CONFIRMATION DEBUG] Showing messagebox")
             result = messagebox.askyesno("Confirm QR Code Recognition", message)
@@ -2766,7 +2975,9 @@ class SimpleKioskApp:
             print(f"[CONFIRMATION DEBUG] Camera turned OFF after face recognition")
             
             # Create confirmation dialog using messagebox for reliability
-            message = f"Face Recognition Confirmation\n\nRecognized: {face['name']}\nEmployee ID: {face['employee_id']}\nConfidence: {face.get('confidence', 0.0)*100:.2f}%\n\nIs this recognition correct?"
+            employee_role = employee.get('role', 'Staff')
+            role_icon = '🛡️' if employee_role == 'Security' else '👥'
+            message = f"Face Recognition Confirmation\n\nRecognized: {face['name']}\nEmployee ID: {face['employee_id']}\nRole: {role_icon} {employee_role}\nConfidence: {face.get('confidence', 0.0)*100:.2f}%\n\nIs this recognition correct?"
 
             print(f"[CONFIRMATION DEBUG] Showing messagebox")
             result = messagebox.askyesno("Confirm Face Recognition", message)
@@ -4007,7 +4218,7 @@ class SimpleKioskApp:
             
             # Excel Headers
             headers = [
-                'Employee ID', 'Employee Name', 'Date', 'Time', 'Status', 
+                'Employee ID', 'Employee Name', 'Role', 'Date', 'Time', 'Status', 
                 'Method', 'Attendance Type', 'Location Name', 'Address', 'Late Status'
             ]
             
@@ -4026,12 +4237,52 @@ class SimpleKioskApp:
             late_count = 0
             ontime_clockin_count = 0
             clockout_count = 0
+            current_row = 2  # Start from row 2 (after header)
+            previous_date = None
             
-            for row, record in enumerate(sorted_records, 2):  # Start from row 2 (after header)
+            for i, record in enumerate(sorted_records):
                 # Parse timestamp
                 record_datetime = datetime.strptime(record['timestamp'], "%Y-%m-%d %H:%M:%S")
                 date_part = record_datetime.strftime("%Y-%m-%d")
                 time_part = record_datetime.strftime("%H:%M:%S")
+                
+                # Check if this is a new date (different from previous record)
+                if previous_date is not None and date_part != previous_date:
+                    # Insert a blank row between different days
+                    current_row += 1
+                    # Add a subtle background color to the separator row for visual clarity
+                    separator_fill = PatternFill(start_color="F5F5F5", end_color="F5F5F5", fill_type="solid")
+                    for col in range(1, len(headers) + 1):
+                        separator_cell = ws.cell(row=current_row, column=col, value="")
+                        separator_cell.fill = separator_fill
+                
+                # Add date header for the first record of each day
+                if previous_date != date_part:
+                    current_row += 1
+                    # Create a date header row
+                    date_header_fill = PatternFill(start_color="E8F4FD", end_color="E8F4FD", fill_type="solid")
+                    date_header_font = Font(bold=True, color="2E86C1")
+                    date_header_alignment = Alignment(horizontal="center", vertical="center")
+                    
+                    # Merge cells for date header
+                    date_cell = ws.cell(row=current_row, column=1, value=f"📅 {date_part}")
+                    date_cell.fill = date_header_fill
+                    date_cell.font = date_header_font
+                    date_cell.alignment = date_header_alignment
+                    date_cell.border = border
+                    
+                    # Fill the rest of the merged row
+                    for col in range(2, len(headers) + 1):
+                        merge_cell = ws.cell(row=current_row, column=col, value="")
+                        merge_cell.fill = date_header_fill
+                        merge_cell.border = border
+                    
+                    # Merge the date header across all columns
+                    ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=len(headers))
+                
+                # Update current row for actual data
+                current_row += 1
+                previous_date = date_part
                 
                 # Format status and attendance type
                 attendance_type = record.get('attendance_type', 'check').upper()
@@ -4053,10 +4304,16 @@ class SimpleKioskApp:
                 is_late = record.get('late', False)
                 late_status = 'LATE' if is_late else 'ON-TIME'
                 
+                # Get employee role
+                employee_data = self.db.get_employee(record['employee_id'])
+                employee_role = employee_data.get('role', 'Staff') if employee_data else 'Staff'
+                role_display = f"🛡️ {employee_role}" if employee_role == 'Security' else f"👥 {employee_role}"
+                
                 # Write row data
                 row_data = [
                     record['employee_id'],
                     record['name'],
+                    role_display,
                     date_part,
                     time_part,
                     status_text,
@@ -4068,7 +4325,7 @@ class SimpleKioskApp:
                 ]
                 
                 for col, value in enumerate(row_data, 1):
-                    cell = ws.cell(row=row, column=col, value=value)
+                    cell = ws.cell(row=current_row, column=col, value=value)
                     cell.alignment = regular_alignment
                     cell.border = border
                     
@@ -4078,13 +4335,13 @@ class SimpleKioskApp:
                             if is_late:
                                 # Late clock-in - red highlighting
                                 cell.fill = late_fill
-                                if col == 10:  # Late Status column
+                                if col == 11:  # Late Status column (shifted by 1 due to Role column)
                                     cell.font = late_font
                                 late_count += 1
                             else:
                                 # On-time clock-in - green highlighting
                                 cell.fill = ontime_fill
-                                if col == 10:  # Late Status column
+                                if col == 11:  # Late Status column (shifted by 1 due to Role column)
                                     cell.font = ontime_font
                                 ontime_clockin_count += 1
                         elif record['status'] == 'out':
@@ -4184,7 +4441,7 @@ class SimpleKioskApp:
             
         def cancel_export():
             dialog.destroy()
-            self.show_success_message("� Excel export cancelled")
+            self.show_success_message("Excel export cancelled")
         
         dialog.bind('<Return>', lambda e: confirm_export())       # Enter key
         dialog.bind('<KP_Enter>', lambda e: confirm_export())     # Numpad Enter
@@ -4218,7 +4475,7 @@ class SimpleKioskApp:
             print(f"[EXCEL EXPORT] Found {len(today_records)} records for {current_date}")
             
             if not today_records:
-                self.show_error_message("� No attendance records found for today")
+                self.show_error_message("No attendance records found for today")
                 return
             
             # Create exports directory if it doesn't exist
@@ -4377,7 +4634,7 @@ class SimpleKioskApp:
                                if r.get('attendance_type') == 'clock' and r['status'] == 'out')
             
             # Show success message with file location
-            success_msg = f"� Exported {len(today_records)} records\nSaved to: {filename}"
+            success_msg = f"Exported {len(today_records)} records\nSaved to: {filename}"
             if actual_late_count > 0:
                 success_msg += f"\n🔴 {actual_late_count} late clock-ins highlighted"
             # Count on-time clock-ins separately for clearer messaging
@@ -4402,14 +4659,11 @@ class SimpleKioskApp:
             
         except Exception as e:
             print(f"[EXCEL EXPORT] Error exporting Excel: {e}")
-            self.show_error_message(f"� Excel export failed: {str(e)}")
+            self.show_error_message(f"Excel export failed: {str(e)}")
     
     def update_loop(self):
         """Main update loop with comprehensive error handling"""
         try:
-            # Monitor CPU usage in main loop
-            self.cpu_monitor.log_cpu_usage("Main Update Loop")
-            
             # Update time
             current_time = datetime.now().strftime("%A, %B %d, %Y - %H:%M:%S")
             self.time_label.configure(text=current_time)
@@ -4419,13 +4673,6 @@ class SimpleKioskApp:
             if current_timestamp - self.last_history_update > 30:
                 self.update_attendance_history()
                 self.last_history_update = current_timestamp
-            
-            # Print CPU summary every 60 seconds
-            if not hasattr(self, 'last_cpu_summary'):
-                self.last_cpu_summary = 0
-            if current_timestamp - self.last_cpu_summary > 60:
-                print(f"[SYSTEM STATUS] {self.cpu_monitor.get_cpu_summary()}")
-                self.last_cpu_summary = current_timestamp
             
             # Check focus every 10 seconds to maintain keyboard control
             if not hasattr(self, 'last_focus_check'):
@@ -4473,9 +4720,6 @@ class SimpleKioskApp:
             if not self.camera_active:
                 return  # Camera is OFF, no processing needed
                 
-            # Monitor CPU usage in camera processing
-            self.cpu_monitor.log_cpu_usage("Camera Processing")
-            
             # Check if main camera is paused (e.g., during registration)
             if hasattr(self, 'main_camera_paused') and self.main_camera_paused:
                 # Debug output only once per pause to avoid spam
@@ -4524,56 +4768,13 @@ class SimpleKioskApp:
                 display_width = int(width * display_height / height)
             display_frame = cv2.resize(frame, (display_width, display_height))
             
-            # Submit frame for background DeepFace processing (non-blocking)
-            self.face_recognition.submit_frame_for_processing(frame)
-            
-            # Get latest recognition results from background thread
-            face_results = self.face_recognition.get_latest_results()
-            recognized_faces = []
-            
-            if face_results:
-                # Convert coordinates to display frame and draw faces
-                display_faces_with_labels = []
-                
-                for face in face_results:
-                    if 'position' in face:
-                        face_confidence = face.get('confidence', 0.0)
-                        x, y, w, h = face['position']
-                        # Scale coordinates to display frame
-                        display_x = int(x * display_width / width)
-                        display_y = int(y * display_height / height)
-                        display_w = int(w * display_width / width)
-                        display_h = int(h * display_height / height)
-                        
-                        # Check confidence and handle accordingly
-                        if face_confidence < CONFIDENCE_THRESHOLD:
-                            # Show low confidence faces with special label
-                            print(f"[CONFIDENCE NOTICE] Low confidence detection: {face_confidence:.2f} < {CONFIDENCE_THRESHOLD}")
-                            display_result = {
-                                'name': 'Low Confidence',
-                                'employee_id': None,
-                                'confidence': face_confidence,
-                                'position': (display_x, display_y, display_w, display_h)
-                            }
-                            display_faces_with_labels.append(display_result)
-                            # Don't add to recognized_faces (no attendance processing)
-                        else:
-                            # High confidence face - process normally
-                            display_result = {
-                                'name': face.get('name'),
-                                'employee_id': face.get('employee_id'),
-                                'confidence': face.get('confidence', 0.0),
-                                'position': (display_x, display_y, display_w, display_h)
-                            }
-                            display_faces_with_labels.append(display_result)
-                            
-                            # Store recognized faces for attendance processing
-                            if face['employee_id']:
-                                recognized_faces.append(face)
-                                print(f"[FACE DEBUG] Recognized: {face['name']} (ID: {face['employee_id']}, confidence: {face['confidence']:.2f})")
-                
-                # Draw faces with proper labels using pure DeepFace results
-                display_frame = self.face_recognition.draw_face_boxes_from_results(display_frame, display_faces_with_labels)
+            # Choose face detection method based on configuration
+            if self.use_ultra_light_detection:
+                # Use Ultra Light Face Detection for maximum performance
+                recognized_faces = self._process_ultra_light_detection(frame, display_frame, display_width, display_height, width, height)
+            else:
+                # Use traditional DeepFace processing
+                recognized_faces = self._process_deepface_detection(frame, display_frame, display_width, display_height, width, height)
             
             if recognized_faces:
                 print(f"[FACE DEBUG] Detected {len(recognized_faces)} face(s)")
@@ -4806,6 +5007,221 @@ class SimpleKioskApp:
             
         except Exception as e:
             print(f"[CAMERA RESTART] Failed to restart camera: {e}")
+    
+    def _process_ultra_light_detection(self, frame, display_frame, display_width, display_height, width, height):
+        """Process frame using Ultra Light Face Detection for maximum performance"""
+        recognized_faces = []
+        
+        try:
+            # Detect faces using ultra light detector
+            detected_faces = self.ultra_light_detector.detect_faces_for_attendance(frame)
+            
+            if detected_faces:
+                # Get the best face for attendance
+                best_face = self.ultra_light_detector.get_best_face(detected_faces)
+                
+                # Draw all detected faces on display frame
+                display_faces_with_labels = []
+                
+                for face_data in detected_faces:
+                    x1, y1, x2, y2 = face_data['bbox']
+                    confidence = face_data['confidence']
+                    
+                    # Scale coordinates to display frame
+                    display_x1 = int(x1 * display_width / width)
+                    display_y1 = int(y1 * display_height / height)
+                    display_x2 = int(x2 * display_width / width)
+                    display_y2 = int(y2 * display_height / height)
+                    
+                    # Extract face region for recognition
+                    face_region = frame[y1:y2, x1:x2]
+                    
+                    # Perform face recognition on the detected face
+                    employee_id = None
+                    employee_name = "Unknown"
+                    recognition_confidence = 0.0
+                    
+                    print(f"[ULTRA DEBUG] Face region size: {face_region.shape if face_region.size > 0 else 'empty'}")
+                    print(f"[ULTRA DEBUG] Bbox coordinates: ({x1}, {y1}, {x2}, {y2})")
+                    
+                    if face_region.size > 0 and face_region.shape[0] > 20 and face_region.shape[1] > 20:  # Valid face region with minimum size
+                        try:
+                            print(f"[ULTRA DEBUG] Calling DeepFace recognition on face region...")
+                            print(f"[ULTRA DEBUG] Face region shape: {face_region.shape}")
+                            
+                            # Use DeepFace recognition on the detected face region
+                            recognized_id, rec_conf = self.face_recognition.recognize_face(face_region)
+                            print(f"[ULTRA DEBUG] DeepFace returned: ID={recognized_id}, confidence={rec_conf}")
+                            
+                            # If direct recognition fails, try with some padding around the face
+                            if not recognized_id:
+                                print(f"[ULTRA DEBUG] Direct recognition failed, trying with padded region...")
+                                
+                                # Add padding around the detected face
+                                padding = 30
+                                padded_x1 = max(0, x1 - padding)
+                                padded_y1 = max(0, y1 - padding) 
+                                padded_x2 = min(frame.shape[1], x2 + padding)
+                                padded_y2 = min(frame.shape[0], y2 + padding)
+                                
+                                padded_face_region = frame[padded_y1:padded_y2, padded_x1:padded_x2]
+                                print(f"[ULTRA DEBUG] Padded region shape: {padded_face_region.shape}")
+                                
+                                if padded_face_region.size > 0:
+                                    recognized_id, rec_conf = self.face_recognition.recognize_face(padded_face_region)
+                                    print(f"[ULTRA DEBUG] Padded recognition returned: ID={recognized_id}, confidence={rec_conf}")
+                            
+                            if recognized_id:
+                                employee_id = recognized_id
+                                recognition_confidence = rec_conf
+                                # Get employee name from known faces
+                                if recognized_id in self.face_recognition.known_faces:
+                                    employee_name = self.face_recognition.known_faces[recognized_id].get('name', recognized_id)
+                                print(f"[ULTRA RECOGNITION] Face recognized: {employee_name} ({employee_id}) confidence: {rec_conf:.2f}")
+                            else:
+                                print(f"[ULTRA RECOGNITION] Face detected but not recognized (detection conf: {confidence:.2f})")
+                        except Exception as rec_error:
+                            print(f"[ULTRA RECOGNITION] Recognition error: {rec_error}")
+                    else:
+                        print(f"[ULTRA DEBUG] Face region too small or invalid for recognition")
+                    
+                    # Create face data in format expected by main drawing system
+                    is_best = best_face and face_data['id'] == best_face['id']
+                    
+                    if employee_id:
+                        # Recognized face
+                        label = f"{employee_name} ({recognition_confidence:.2f})"
+                    else:
+                        # Detected but unrecognized face
+                        label = f"Face Detected ({confidence:.2f})"
+                    
+                    if is_best:
+                        label += " [BEST]"
+                    
+                    face_result = {
+                        'name': employee_name if employee_id else label,
+                        'employee_id': employee_id,  # Now includes actual recognition results
+                        'confidence': recognition_confidence if employee_id else confidence,
+                        'position': (display_x1, display_y1, display_x2 - display_x1, display_y2 - display_y1),
+                        'is_best': is_best
+                    }
+                    display_faces_with_labels.append(face_result)
+                    
+                    # Add to recognized_faces so main system can draw them
+                    recognized_faces.append(face_result)
+                
+                # Don't draw faces here - let the main system handle it
+                # display_frame = self._draw_ultra_light_faces(display_frame, display_faces_with_labels)
+                
+                # For attendance processing, we could integrate with recognition here
+                # For now, ultra light detection is mainly for showing real-time face detection
+                # You could add face recognition integration here if needed
+                
+        except Exception as e:
+            print(f"[ULTRA LIGHT ERROR] Detection processing failed: {e}")
+        
+        return recognized_faces
+    
+    def _process_deepface_detection(self, frame, display_frame, display_width, display_height, width, height):
+        """Process frame using traditional DeepFace detection"""
+        recognized_faces = []
+        
+        try:
+            # Submit frame for background DeepFace processing (non-blocking)
+            self.face_recognition.submit_frame_for_processing(frame)
+            
+            # Get latest recognition results from background thread
+            face_results = self.face_recognition.get_latest_results()
+            
+            if face_results:
+                # Convert coordinates to display frame and draw faces
+                display_faces_with_labels = []
+                
+                for face in face_results:
+                    if 'position' in face:
+                        face_confidence = face.get('confidence', 0.0)
+                        x, y, w, h = face['position']
+                        # Scale coordinates to display frame
+                        display_x = int(x * display_width / width)
+                        display_y = int(y * display_height / height)
+                        display_w = int(w * display_width / width)
+                        display_h = int(h * display_height / height)
+                        
+                        # Check confidence and handle accordingly
+                        CONFIDENCE_THRESHOLD = 0.6  # Define threshold
+                        if face_confidence < CONFIDENCE_THRESHOLD:
+                            # Show low confidence faces with special label
+                            print(f"[CONFIDENCE NOTICE] Low confidence detection: {face_confidence:.2f} < {CONFIDENCE_THRESHOLD}")
+                            display_result = {
+                                'name': 'Low Confidence',
+                                'employee_id': None,
+                                'confidence': face_confidence,
+                                'position': (display_x, display_y, display_w, display_h)
+                            }
+                            display_faces_with_labels.append(display_result)
+                            # Don't add to recognized_faces (no attendance processing)
+                        else:
+                            # High confidence face - process normally
+                            display_result = {
+                                'name': face.get('name'),
+                                'employee_id': face.get('employee_id'),
+                                'confidence': face.get('confidence', 0.0),
+                                'position': (display_x, display_y, display_w, display_h)
+                            }
+                            display_faces_with_labels.append(display_result)
+                            
+                            # Store recognized faces for attendance processing
+                            if face['employee_id']:
+                                recognized_faces.append(face)
+                                print(f"[FACE DEBUG] Recognized: {face['name']} (ID: {face['employee_id']}, confidence: {face['confidence']:.2f})")
+                
+                # Draw faces with proper labels using pure DeepFace results
+                display_frame = self.face_recognition.draw_face_boxes_from_results(display_frame, display_faces_with_labels)
+        
+        except Exception as e:
+            print(f"[DEEPFACE ERROR] Detection processing failed: {e}")
+        
+        return recognized_faces
+    
+    def _draw_ultra_light_faces(self, frame, faces_with_labels):
+        """Draw face detection boxes for ultra light detector"""
+        result_frame = frame.copy()
+        
+        for face in faces_with_labels:
+            x, y, w, h = face['position']
+            x2, y2 = x + w, y + h
+            confidence = face['confidence']
+            name = face['name']
+            is_best = face.get('is_best', False)
+            
+            # Color coding
+            color = (0, 255, 0) if is_best else (0, 255, 255)  # Green for best, yellow for others
+            thickness = 3 if is_best else 2
+            
+            # Draw bounding box
+            cv2.rectangle(result_frame, (x, y), (x2, y2), color, thickness)
+            
+            # Draw label with background
+            label = name
+            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
+            
+            # Background for text
+            cv2.rectangle(result_frame, 
+                         (x, y - label_size[1] - 10), 
+                         (x + label_size[0], y), 
+                         color, -1)
+            
+            # Text
+            cv2.putText(result_frame, label, (x, y - 5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        
+        # Add performance overlay
+        if hasattr(self, 'ultra_light_detector') and self.ultra_light_detector:
+            fps = self.ultra_light_detector.get_performance_stats()['fps']
+            cv2.putText(result_frame, f"Ultra Light FPS: {fps:.1f}", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        return result_frame
 
 def main():
     """Run the simple kiosk application"""

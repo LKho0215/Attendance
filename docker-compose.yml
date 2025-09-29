@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  attendance-system:
+    build: .
+    container_name: attendance-kiosk
+    volumes:
+      # Mount data directories to persist data
+      - ./data:/app/data
+      - ./exports:/app/exports
+    devices:
+      # Access to camera (Linux/macOS)
+      - /dev/video0:/dev/video0
+    environment:
+      - DISPLAY=${DISPLAY}
+    network_mode: host
+    restart: unless-stopped
+    
+  # Optional: MongoDB service if you want to use MongoDB
+  mongodb:
+    image: mongo:5.0
+    container_name: attendance-mongo
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password123
+    volumes:
+      - mongodb_data:/data/db
+    restart: unless-stopped
+
+volumes:
+  mongodb_data:
