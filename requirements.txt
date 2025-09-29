@@ -17,4 +17,4 @@ pywebview>=4.0.0
 pyzbar>=0.1.9
 python-telegram-bot>=20.0
 asyncio-mqtt>=0.11.0
-tf-keras>=3.0.0
+tf-keras==2.20.1
