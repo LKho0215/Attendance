@@ -1973,6 +1973,95 @@ class SimpleKioskApp:
         except Exception as e:
             print(f"[QUALITY CHECK] Error checking quality: {e}")
             return False
+
+    def _check_face_distance_and_provide_feedback(self, frame, face_coords):
+        """
+        Check face distance and provide user feedback
+        
+        Args:
+            frame: Camera frame
+            face_coords: Face bounding box coordinates (x, y, w, h)
+            
+        Returns:
+            tuple: (is_good_distance, feedback_message)
+        """
+        if face_coords is None:
+            return False, "Please position your face in the camera view"
+        
+        try:
+            x, y, w, h = face_coords
+            
+            # Calculate face size relative to frame
+            frame_area = frame.shape[0] * frame.shape[1]
+            face_area = w * h
+            face_ratio = face_area / frame_area
+            
+            # Define distance thresholds
+            TOO_FAR_THRESHOLD = 0.03    # Less than 3% of frame
+            TOO_NEAR_THRESHOLD = 0.4    # More than 40% of frame
+            OPTIMAL_MIN = 0.08          # 8% for optimal range
+            OPTIMAL_MAX = 0.25          # 25% for optimal range
+            
+            # Check distance and provide specific feedback
+            if face_ratio < TOO_FAR_THRESHOLD:
+                return False, "Please move CLOSER to the camera"
+            elif face_ratio > TOO_NEAR_THRESHOLD:
+                return False, "Please move FURTHER from the camera"
+            elif face_ratio < OPTIMAL_MIN:
+                return True, "Move a bit closer for optimal recognition"
+            elif face_ratio > OPTIMAL_MAX:
+                return True, "Move a bit further for optimal recognition"
+            else:
+                return True, "Perfect distance - ready for recognition"
+                
+        except Exception as e:
+            print(f"[DISTANCE CHECK] Error checking distance: {e}")
+            return False, "Error checking face distance"
+
+    def _display_distance_feedback(self, display_frame, feedback_message, is_good_distance):
+        """
+        Display distance feedback on the camera frame
+        
+        Args:
+            display_frame: Frame to draw on
+            feedback_message: Message to display
+            is_good_distance: Whether distance is acceptable
+        """
+        try:
+            # Choose color based on distance quality
+            if is_good_distance:
+                if "Perfect distance" in feedback_message:
+                    color = (0, 255, 0)  # Green for perfect
+                else:
+                    color = (0, 255, 255)  # Yellow for acceptable
+            else:
+                color = (0, 0, 255)  # Red for bad distance
+            
+            # Display feedback at top of frame
+            frame_height, frame_width = display_frame.shape[:2]
+            
+            # Background rectangle for better text visibility
+            text_size = cv2.getTextSize(feedback_message, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
+            rect_width = text_size[0] + 20
+            rect_height = text_size[1] + 20
+            rect_x = (frame_width - rect_width) // 2
+            rect_y = 20
+            
+            # Draw background rectangle
+            cv2.rectangle(display_frame, 
+                         (rect_x, rect_y), 
+                         (rect_x + rect_width, rect_y + rect_height), 
+                         (0, 0, 0), -1)
+            
+            # Draw text
+            text_x = rect_x + 10
+            text_y = rect_y + text_size[1] + 10
+            cv2.putText(display_frame, feedback_message, 
+                       (text_x, text_y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            
+        except Exception as e:
+            print(f"[DISPLAY FEEDBACK] Error displaying feedback: {e}")
     
     def set_attendance_mode(self, mode):
         """Set the attendance mode and switch interfaces"""
@@ -3153,7 +3242,7 @@ class SimpleKioskApp:
         """Clear status message"""
         self.message_frame.pack_forget()
         self.status_label.configure(
-            text="● READY - Please position yourself in front of the camera",
+            text="Please position yourself in front of the camera",
             text_color="green"
         )
     
@@ -4877,6 +4966,9 @@ class SimpleKioskApp:
         # Draw face boxes if any detected
         if recognized_faces:
             display_frame = self.face_recognition.draw_face_boxes_from_results(display_frame, recognized_faces)
+        else:
+            # No faces detected - show positioning guidance
+            self._display_distance_feedback(display_frame, "Please position your face in the camera view", False)
         
         # Ensure display_frame is valid before color conversion
         if display_frame is None:
@@ -5020,6 +5112,15 @@ class SimpleKioskApp:
                 # Get the best face for attendance
                 best_face = self.ultra_light_detector.get_best_face(detected_faces)
                 
+                # Check distance for the best face and provide feedback
+                if best_face:
+                    x1, y1, x2, y2 = best_face['bbox']
+                    face_coords = (x1, y1, x2 - x1, y2 - y1)  # Convert to (x, y, w, h) format
+                    is_good_distance, feedback_message = self._check_face_distance_and_provide_feedback(frame, face_coords)
+                    
+                    # Display distance feedback on the frame
+                    self._display_distance_feedback(display_frame, feedback_message, is_good_distance)
+                
                 # Draw all detected faces on display frame
                 display_faces_with_labels = []
                 
@@ -5116,6 +5217,9 @@ class SimpleKioskApp:
                 # For attendance processing, we could integrate with recognition here
                 # For now, ultra light detection is mainly for showing real-time face detection
                 # You could add face recognition integration here if needed
+            else:
+                # No faces detected by Ultra Light detector - show positioning guidance
+                self._display_distance_feedback(display_frame, "Please position your face in the camera view", False)
                 
         except Exception as e:
             print(f"[ULTRA LIGHT ERROR] Detection processing failed: {e}")
@@ -5134,6 +5238,24 @@ class SimpleKioskApp:
             face_results = self.face_recognition.get_latest_results()
             
             if face_results:
+                # Check distance for the first detected face and provide feedback
+                best_face = None
+                best_confidence = 0.0
+                
+                # Find the face with highest confidence for distance checking
+                for face in face_results:
+                    if 'position' in face and face.get('confidence', 0.0) > best_confidence:
+                        best_face = face
+                        best_confidence = face.get('confidence', 0.0)
+                
+                if best_face:
+                    x, y, w, h = best_face['position']
+                    face_coords = (x, y, w, h)
+                    is_good_distance, feedback_message = self._check_face_distance_and_provide_feedback(frame, face_coords)
+                    
+                    # Display distance feedback on the frame
+                    self._display_distance_feedback(display_frame, feedback_message, is_good_distance)
+                
                 # Convert coordinates to display frame and draw faces
                 display_faces_with_labels = []
                 
@@ -5177,6 +5299,9 @@ class SimpleKioskApp:
                 
                 # Draw faces with proper labels using pure DeepFace results
                 display_frame = self.face_recognition.draw_face_boxes_from_results(display_frame, display_faces_with_labels)
+            else:
+                # No faces detected by DeepFace - show positioning guidance
+                self._display_distance_feedback(display_frame, "Please position your face in the camera view", False)
         
         except Exception as e:
             print(f"[DEEPFACE ERROR] Detection processing failed: {e}")

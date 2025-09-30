@@ -7,7 +7,7 @@ MONGODB_CONFIG = {
     # Update this based on your deployment scenario:
     
     # SCENARIO 1: Development/Local Testing (Current)
-    "connection_string": "mongodb://localhost:27017/",
+    "connection_string": "mongodb+srv://admin:admin@cluster0.r9ddy.mongodb.net/attendance_system?retryWrites=true&w=majority",
     
     # SCENARIO 2: Company Server Room (Update when deploying)
     # "connection_string": "mongodb://[server-ip]:27017/",
