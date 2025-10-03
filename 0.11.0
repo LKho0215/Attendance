@@ -1,9 +1,0 @@
-Collecting asyncio-mqtt
-  Downloading asyncio_mqtt-0.16.2-py3-none-any.whl.metadata (17 kB)
-Collecting paho-mqtt>=1.6.0 (from asyncio-mqtt)
-  Downloading paho_mqtt-2.1.0-py3-none-any.whl.metadata (23 kB)
-Downloading asyncio_mqtt-0.16.2-py3-none-any.whl (17 kB)
-Downloading paho_mqtt-2.1.0-py3-none-any.whl (67 kB)
-Installing collected packages: paho-mqtt, asyncio-mqtt
-
-Successfully installed asyncio-mqtt-0.16.2 paho-mqtt-2.1.0

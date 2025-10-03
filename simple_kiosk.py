@@ -12,9 +12,32 @@ import ctypes
 import re
 import numpy as np
 import traceback
+import pygame
 from datetime import datetime, timedelta
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+
+# Audio feedback imports
+try:
+    import pygame
+    pygame.mixer.init()
+    PYGAME_AVAILABLE = True
+    print("[AUDIO] Pygame audio initialized successfully")
+except ImportError:
+    PYGAME_AVAILABLE = False
+    print("[AUDIO] Pygame not available, falling back to system audio")
+
+try:
+    import winsound  # Windows built-in audio fallback
+    WINSOUND_AVAILABLE = True
+    print("[AUDIO] Windows winsound available as fallback")
+except ImportError:
+    WINSOUND_AVAILABLE = False
+    print("[AUDIO] Winsound not available")
+
+# Check if any audio is available
+AUDIO_AVAILABLE = PYGAME_AVAILABLE or WINSOUND_AVAILABLE
+print(f"[AUDIO] Audio system status - Pygame: {PYGAME_AVAILABLE}, Winsound: {WINSOUND_AVAILABLE}, Overall: {AUDIO_AVAILABLE}")
 
 from core.mongodb_manager import MongoDBManager
 from core.deepface_recognition import DeepFaceRecognitionSystem, CameraManager
@@ -109,6 +132,10 @@ class SimpleKioskApp:
         
         # Create GUI
         self.create_interface()
+        
+        # Initialize audio feedback
+        self.audio_enabled = True  # Can be toggled via settings if needed
+        print(f"[AUDIO] Audio feedback initialized: {AUDIO_AVAILABLE}")
         
         # Set initial mode appearance
         self.set_attendance_mode("CLOCK")
@@ -354,7 +381,7 @@ class SimpleKioskApp:
         
         self.camera_label = ctk.CTkLabel(
             self.camera_frame, 
-            text="📷 Camera Off\n\nPress + (Plus) or Numpad +\nto activate camera for recognition\n\nManual Recognition Mode",
+            text="📷 Camera Off\n\nPress Numpad +\nto activate camera for recognition\n\nManual Recognition Mode",
             font=ctk.CTkFont(size=20)
         )
         self.camera_label.pack(expand=True, padx=15, pady=15)
@@ -673,6 +700,10 @@ class SimpleKioskApp:
             # *** CRITICAL: Stop main camera COMPLETELY when registration button is pressed ***
             print("[REG DEBUG] Registration button pressed - stopping main camera completely")
             
+            # Remember if camera was active before registration
+            self.camera_was_active_before_registration = self.camera_active
+            print(f"[REG DEBUG] Camera was active before registration: {self.camera_was_active_before_registration}")
+            
             # Stop the main camera and update display
             if self.camera_active:
                 self.stop_camera()
@@ -838,7 +869,7 @@ class SimpleKioskApp:
                 fg='white',
                 width=20,
                 height=2,
-                command=dialog.destroy
+                command=lambda: self.close_registration_dialog(dialog)
             )
             cancel_btn.pack(side="left", padx=10)
             
@@ -875,24 +906,34 @@ class SimpleKioskApp:
                 self.camera_manager.stop_camera()
                 print("[REG DEBUG] Registration camera stopped")
             
-            # Resume main camera processing IMMEDIATELY
+            # Resume main camera processing flag
             if hasattr(self, 'main_camera_paused'):
                 self.main_camera_paused = False
-                print("[REG DEBUG] Main camera flag cleared")
+                print("[REG DEBUG] Main camera pause flag cleared")
             
-            # Restart the main camera
-            if not self.camera_active:
-                print("[REG DEBUG] Restarting main camera after registration")
+            # Only restart camera if it was active BEFORE registration started
+            if hasattr(self, 'camera_was_active_before_registration') and self.camera_was_active_before_registration:
+                print("[REG DEBUG] Restoring camera to previous active state")
                 self.start_camera()
+            else:
+                print("[REG DEBUG] Camera was not active before registration - keeping it off")
+            
+            # Clean up the registration state flag
+            if hasattr(self, 'camera_was_active_before_registration'):
+                delattr(self, 'camera_was_active_before_registration')
             
             # Resume background face recognition
             if hasattr(self, 'face_recognition') and self.face_recognition:
                 print("[REG DEBUG] Background face recognition resumed")
             
-            # Force update of camera display
+            # Update camera display based on whether camera was previously active
             if hasattr(self, 'camera_label'):
-                self.camera_label.configure(text="📷 Camera Resuming...")
-                print("[REG DEBUG] Camera label updated")
+                if hasattr(self, 'camera_was_active_before_registration') and self.camera_was_active_before_registration:
+                    self.camera_label.configure(text="📷 Camera Resuming...")
+                    print("[REG DEBUG] Camera label updated - resuming camera")
+                else:
+                    self.camera_label.configure(text="📷 Camera Off\n\nPress Numpad +\nto activate camera for recognition\n\nManual Recognition Mode")
+                    print("[REG DEBUG] Camera label updated - camera remains off")
             
             dialog.destroy()
             
@@ -907,10 +948,13 @@ class SimpleKioskApp:
                 self.main_camera_paused = False
                 print("[REG DEBUG] Main camera flag force-cleared after error")
             
-            # Restart main camera if not active
-            if not self.camera_active:
-                print("[REG DEBUG] Force-restarting main camera after error")
-                self.start_camera()
+            # Clean up the registration state flag even on error
+            if hasattr(self, 'camera_was_active_before_registration'):
+                delattr(self, 'camera_was_active_before_registration')
+                print("[REG DEBUG] Registration state flag cleaned up after error")
+            
+            # Do NOT auto-restart camera on error - let user control it
+            print("[REG DEBUG] Registration dialog error handled - camera control returned to user")
     
     def start_face_capture_with_preview(self, dialog):
         """Start face capture with live camera preview and bounding boxes"""
@@ -3000,64 +3044,20 @@ class SimpleKioskApp:
         
         print(f"[GROUP DEBUG] Group checkout completed - Success: {len(successful_checkouts)}, Failed: {len(failed_checkouts)}")
     
-    def show_qr_recognition_confirmation(self, qr_code, employee):
-        """Show confirmation dialog for QR code recognition"""
-        try:
-            print(f"[CONFIRMATION DEBUG] Starting QR confirmation dialog for {employee['name']}")
-            
-            # Turn OFF camera after recognition (manual mode)
-            self.stop_camera()
-            print(f"[CONFIRMATION DEBUG] Camera turned OFF after QR recognition")
-            
-            # Create confirmation dialog using messagebox for reliability
-            employee_role = employee.get('role', 'Staff')
-            role_icon = '🛡️' if employee_role == 'Security' else '👥'
-            message = f"QR Code Recognition Confirmation\n\nScanned: {employee['name']}\nEmployee ID: {employee['employee_id']}\nRole: {role_icon} {employee_role}\nQR Data: {qr_code.get('data', 'N/A')}\n\nIs this scan correct?"
-            
-            print(f"[CONFIRMATION DEBUG] Showing messagebox")
-            result = messagebox.askyesno("Confirm QR Code Recognition", message)
-            print(f"[CONFIRMATION DEBUG] User response: {result}")
-            
-            # Process result
-            if result:
-                # User confirmed - process attendance
-                success, message = self.process_attendance_with_location_check(
-                    employee['employee_id'], "qr_code"
-                )
-                
-                if success:
-                    print(f"[QR SCAN DEBUG] Attendance success: {message}")
-                    if message != "Location selection initiated":
-                        self.show_success_message(f"✓ {employee['name']} - {message}")
-                else:
-                    print(f"[QR SCAN DEBUG] Attendance failed: {message}")
-                    # Check if this is an early clock-out error
-                    if self.is_early_clockout_error(message):
-                        self.handle_early_clockout_error(employee['name'], message)
-                    else:
-                        self.show_error_message(f"✗ {message}")
-                
-                # Keep camera OFF after successful processing
-                print(f"[CONFIRMATION DEBUG] Keeping camera OFF after successful QR processing")
-                
-            else:
-                # User rejected - keep camera OFF, let them manually try again
-                print(f"[QR SCAN DEBUG] QR scan rejected by user: {employee['name']}")
-                self.show_error_message("❌ QR code scan rejected\n\nPress + to try scanning again")
-                
-                # Keep camera OFF - employee must manually press + to try again
-                print(f"[CONFIRMATION DEBUG] Camera remains OFF - manual activation required for retry")
-                
-        except Exception as e:
-            print(f"Error in QR recognition confirmation: {e}")
-            print(f"[CONFIRMATION DEBUG] Exception traceback: {traceback.format_exc()}")
-            # Keep camera OFF in case of error - manual activation required
-            self.show_error_message("Error in QR code confirmation\n\nPress + to try again")
+    # DEPRECATED: QR codes now process directly without confirmation
+    # def show_qr_recognition_confirmation(self, qr_code, employee):
+    #     """Show confirmation dialog for QR code recognition"""
+    #     # This function is no longer used - QR codes are processed directly
+    #     # since they are unique identifiers with high reliability
+    #     pass
 
     def show_face_recognition_confirmation(self, face, employee):
         """Show confirmation dialog for face recognition"""
         try:
             print(f"[CONFIRMATION DEBUG] Starting face confirmation dialog for {employee['name']}")
+            
+            # Play detection beep when face is recognized
+            self.play_scan_detected_beep()
             
             # Turn OFF camera after recognition (manual mode)
             self.stop_camera()
@@ -3083,8 +3083,12 @@ class SimpleKioskApp:
                     print(f"[FACE DEBUG] Attendance success: {message}")
                     if message != "Location selection initiated":
                         self.show_success_message(f"✓ {employee['name']} - {message}")
+                        # Play success beep for successful attendance
+                        # self.()
                 else:
                     print(f"[FACE DEBUG] Attendance failed: {message}")
+                    # Play error beep for failed attendance
+                    
                     # Check if this is an early clock-out error
                     if self.is_early_clockout_error(message):
                         self.handle_early_clockout_error(employee['name'], message)
@@ -3097,6 +3101,8 @@ class SimpleKioskApp:
             else:
                 # User rejected - keep camera OFF, let them manually try again
                 print(f"[FACE DEBUG] Recognition rejected by user: {face['name']}")
+                # Play error beep when user rejects recognition
+                
                 self.show_error_message("❌ Face recognition rejected\n\nPress + to try recognition again")
                 
                 # Keep camera OFF - employee must manually press + to try again
@@ -3128,6 +3134,45 @@ class SimpleKioskApp:
         
         # Auto-hide after timeout
         self.root.after(self.auto_timeout * 1000, self.clear_message)
+    
+    def play_scan_detected_beep(self):
+        """Play quick beep when face or QR is detected (before processing)"""
+        if not self.audio_enabled or not AUDIO_AVAILABLE:
+            return
+        
+        def play_audio():
+            try:
+                if PYGAME_AVAILABLE:
+                    # Try to play MP3 file using pygame
+                    if os.path.exists("scan.mp3"):
+                        sound = pygame.mixer.Sound("scan.mp3")
+                        sound.play()
+                        print("[AUDIO] Playing scan.mp3 via pygame (detection)")
+                    else:
+                        print("[AUDIO] scan.mp3 not found, falling back to beep")
+                        # Fallback to system beep if MP3 not found
+                        if WINSOUND_AVAILABLE:
+                            winsound.Beep(600, 100)
+                        else:
+                            os.system('echo \a')
+                elif WINSOUND_AVAILABLE:
+                    # Fallback to winsound beep
+                    winsound.Beep(600, 100)
+                    print("[AUDIO] Playing detection beep via winsound")
+                else:
+                    # Final fallback to system beep
+                    os.system('echo \a')
+                    print("[AUDIO] Playing system detection beep")
+            except Exception as e:
+                print(f"[AUDIO] Error playing detection beep: {e}")
+                # Emergency fallback
+                try:
+                    os.system('echo \a')
+                except:
+                    pass
+        
+        # Play audio in background thread to avoid blocking UI
+        threading.Thread(target=play_audio, daemon=True).start()
     
     def show_early_clockout_error(self, employee_name, min_time, shift_name):
         """Show dedicated error dialog for early clock-out attempts"""
@@ -3626,6 +3671,12 @@ class SimpleKioskApp:
     def start_camera(self):
         """Start camera"""
         print("[CAMERA DEBUG] Attempting to start camera...")
+        
+        # Clear any registration pause flags when user manually starts camera
+        if hasattr(self, 'main_camera_paused'):
+            self.main_camera_paused = False
+            print("[CAMERA DEBUG] Cleared registration pause flag - user manually starting camera")
+        
         if self.camera_manager.start_camera():
             self.camera_active = True
             
@@ -3654,7 +3705,7 @@ class SimpleKioskApp:
         # Clear the camera display and show manual activation instructions
         self.camera_label.configure(
             image="", 
-            text="📷 Camera Off\n\nPress + (Plus) or Numpad +\nto activate camera for recognition\n\nManual Recognition Mode"
+            text="📷 Camera Off\n\nPress Numpad +\nto activate camera for recognition\n\nManual Recognition Mode"
         )
         print("[CAMERA DEBUG] Camera stopped")
     
@@ -4890,18 +4941,36 @@ class SimpleKioskApp:
                 if hasattr(self, 'personal_scanning_active') and self.personal_scanning_active:
                     # Auto-fill employee ID in personal dialog
                     if hasattr(self, 'personal_id_entry'):
-                        self.personal_id_entry.delete(0, tk.END)
-                        self.personal_id_entry.insert(0, face['employee_id'])
-                        print(f"[PERSONAL DEBUG] Face recognition auto-filled: {face['employee_id']}")
+                        try:
+                            # Check if widget is still valid before using it
+                            if self.personal_id_entry.winfo_exists():
+                                self.personal_id_entry.delete(0, tk.END)
+                                self.personal_id_entry.insert(0, face['employee_id'])
+                                print(f"[PERSONAL DEBUG] Face recognition auto-filled: {face['employee_id']}")
+                            else:
+                                print("[PERSONAL DEBUG] Personal entry widget no longer exists")
+                                self.personal_scanning_active = False  # Reset flag if widget is gone
+                        except tk.TclError as e:
+                            print(f"[PERSONAL DEBUG] Error accessing personal entry widget: {e}")
+                            self.personal_scanning_active = False  # Reset flag on error
                     return
                 
                 # Check if group scanning is active
                 if hasattr(self, 'group_scanning_active') and self.group_scanning_active:
                     # Auto-fill employee ID in group dialog
                     if hasattr(self, 'group_current_id'):
-                        self.group_current_id.delete(0, tk.END)
-                        self.group_current_id.insert(0, face['employee_id'])
-                        print(f"[GROUP DEBUG] Face recognition auto-filled: {face['employee_id']}")
+                        try:
+                            # Check if widget is still valid before using it
+                            if self.group_current_id.winfo_exists():
+                                self.group_current_id.delete(0, tk.END)
+                                self.group_current_id.insert(0, face['employee_id'])
+                                print(f"[GROUP DEBUG] Face recognition auto-filled: {face['employee_id']}")
+                            else:
+                                print("[GROUP DEBUG] Group entry widget no longer exists")
+                                self.group_scanning_active = False  # Reset flag if widget is gone
+                        except tk.TclError as e:
+                            print(f"[GROUP DEBUG] Error accessing group entry widget: {e}")
+                            self.group_scanning_active = False  # Reset flag on error
                     return
                 
                 print(f"[FACE DEBUG] Recognized employee: {face['name']} ({face['employee_id']})")
@@ -4944,13 +5013,45 @@ class SimpleKioskApp:
                 if employee:
                     print(f"[QR SCAN DEBUG] Found employee: {employee['name']} ({employee['employee_id']})")
                     
-                    # Show confirmation dialog before processing attendance
-                    self.show_qr_recognition_confirmation(first_code, employee)
+                    # Play detection beep when QR code is recognized
+                    self.play_scan_detected_beep()
+                    
+                    # Process QR code directly without confirmation - QR codes are unique and reliable
+                    print(f"[QR SCAN DEBUG] Processing QR code directly for {employee['name']}")
+                    
+                    # Turn OFF camera after QR recognition (manual mode)
+                    self.stop_camera()
+                    print(f"[QR SCAN DEBUG] Camera turned OFF after QR recognition")
+                    
+                    # Process attendance directly
+                    success, message = self.process_attendance_with_location_check(
+                        employee['employee_id'], "qr_code"
+                    )
+                    
+                    if success:
+                        print(f"[QR SCAN DEBUG] Attendance success: {message}")
+                        if message != "Location selection initiated":
+                            self.show_success_message(f"✓ {employee['name']} - {message}")
+                            # Play success beep for successful attendance
+                            # self.()
+                    else:
+                        print(f"[QR SCAN DEBUG] Attendance failed: {message}")
+                        # Play error beep for failed attendance
+                        
+                        # Check if this is an early clock-out error
+                        if self.is_early_clockout_error(message):
+                            self.handle_early_clockout_error(employee['name'], message)
+                        else:
+                            self.show_error_message(f"✗ {message}")
                 else:
                     print(f"[QR SCAN DEBUG] Employee not found in database")
+                    # Play error beep for unknown employee
+                    
                     self.show_error_message(f"✗ Employee {employee_id} not found")
             else:
                 print(f"[QR SCAN DEBUG] Invalid QR code data: '{first_code.get('data')}'")
+                # Play error beep for invalid QR format
+                
                 self.show_error_message(f"✗ Invalid QR code format")
             return
         else:
