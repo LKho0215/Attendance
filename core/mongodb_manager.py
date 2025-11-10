@@ -61,15 +61,19 @@ class MongoDBManager:
             if database_name is None:
                 database_name = MONGODB_CONFIG.get("database_name", "attendance_system")
         except ImportError:
-            print("[MONGODB] No config found, using defaults")
-            if connection_string is None:
-                connection_string = "mongodb://localhost:27017/"
-            if database_name is None:
-                database_name = "attendance_system"
+            print("[MONGODB ERROR] mongo_config.py not found!")
+            raise Exception("MongoDB configuration file (mongo_config.py) is required")
+        
+        # Validate connection string
+        if not connection_string:
+            print("[MONGODB ERROR] No connection string provided in mongo_config.py")
+            raise Exception("MongoDB connection string is required in mongo_config.py")
         
         try:
-            # Try main connection string first
-            self.client = MongoClient(connection_string, serverSelectionTimeoutMS=3000)
+            print(f"[MONGODB] Connecting to MongoDB: {database_name}...")
+            
+            # Connect to MongoDB with timeout
+            self.client = MongoClient(connection_string, serverSelectionTimeoutMS=5000)
             self.db = self.client[database_name]
             
             # Test connection
@@ -77,61 +81,24 @@ class MongoDBManager:
             
             # Determine connection type for logging
             if "localhost" in connection_string or "127.0.0.1" in connection_string:
-                print(f"[MONGODB] Successfully connected to local MongoDB: {database_name}")
+                print(f"[MONGODB] ✓ Successfully connected to local MongoDB: {database_name}")
             elif "mongodb+srv:" in connection_string or "mongodb.net" in connection_string:
-                print(f"[MONGODB] Successfully connected to MongoDB Atlas: {database_name}")
+                print(f"[MONGODB] ✓ Successfully connected to MongoDB Atlas: {database_name}")
             else:
-                print(f"[MONGODB] Successfully connected to MongoDB server: {database_name}")
+                print(f"[MONGODB] ✓ Successfully connected to MongoDB server: {database_name}")
             
             # Initialize collections and indexes
             self.init_collections()
             
         except Exception as e:
-            print(f"[MONGODB ERROR] Primary connection failed: {e}")
-            
-            # Try fallback connections in order
-            try:
-                from mongo_config import MONGODB_CONFIG
-                fallback_connections = MONGODB_CONFIG.get("fallback_connections", [])
-                
-                for fallback_conn in fallback_connections:
-                    if fallback_conn == connection_string:
-                        continue  # Skip if same as primary
-                        
-                    try:
-                        print(f"[MONGODB] Trying fallback: {fallback_conn}")
-                        self.client = MongoClient(fallback_conn, serverSelectionTimeoutMS=3000)
-                        self.db = self.client[database_name]
-                        self.client.admin.command('ping')
-                        
-                        # Determine connection type for logging
-                        if "localhost" in fallback_conn or "127.0.0.1" in fallback_conn:
-                            print(f"[MONGODB] Connected to local MongoDB fallback: {database_name}")
-                        else:
-                            print(f"[MONGODB] Connected to server fallback: {database_name}")
-                            
-                        self.init_collections()
-                        return  # Success, exit the retry loop
-                        
-                    except Exception as fallback_error:
-                        print(f"[MONGODB] Fallback {fallback_conn} failed: {fallback_error}")
-                        continue
-                
-                # If all fallbacks failed, try Atlas as last resort
-                atlas_connection = MONGODB_CONFIG.get("atlas_connection")
-                if atlas_connection and atlas_connection != connection_string:
-                    print("[MONGODB] Trying Atlas as final fallback...")
-                    self.client = MongoClient(atlas_connection, serverSelectionTimeoutMS=5000)
-                    self.db = self.client[database_name]
-                    self.client.admin.command('ping')
-                    print(f"[MONGODB] Connected to Atlas fallback: {database_name}")
-                    self.init_collections()
-                else:
-                    raise Exception("All connection methods failed")
-                    
-            except Exception as e2:
-                print(f"[MONGODB ERROR] All connection attempts failed: {e2}")
-                raise
+            print(f"[MONGODB ERROR] ✗ Failed to connect to MongoDB!")
+            print(f"[MONGODB ERROR] Error: {e}")
+            print(f"[MONGODB ERROR] Connection string: {connection_string[:20]}...")
+            print(f"[MONGODB ERROR] Please check:")
+            print(f"[MONGODB ERROR]   1. MongoDB server is running")
+            print(f"[MONGODB ERROR]   2. Connection string in mongo_config.py is correct")
+            print(f"[MONGODB ERROR]   3. Network/firewall allows MongoDB connection")
+            raise Exception(f"MongoDB connection failed: {e}")
     
     def init_collections(self):
         """Initialize collections and create indexes for performance"""

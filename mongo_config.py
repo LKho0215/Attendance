@@ -1,17 +1,13 @@
 MONGODB_CONFIG = {
+    # Primary MongoDB connection string
+    "connection_string": "mongodb://admin:admin@192.168.8.41:27016/attendance_system?authSource=admin",  # Production DB
+    # "connection_string": "mongodb://admin:admin@192.168.8.41:27017/attendance_system?authSource=admin",  # Staging DB
+    # "connection_string": "mongodb://localhost:27017/",  # Local DB
     
-    "connection_string": "mongodb://admin:admin@192.168.8.41:27016/attendance_system?authSource=admin", #prod db
-    # "connection_string": "mongodb://admin:admin@192.168.8.41:27017/attendance_system?authSource=admin", # stag db
-
-    
-    "fallback_connections": [
-        "mongodb://admin:admin@192.168.8.41:27015/attendance_system?authSource=admin",
-    ],
-    
-    "atlas_connection": "mongodb+srv://admin:admin@cluster0.r9ddy.mongodb.net/attendance_system?retryWrites=true&w=majority",
-    
+    # Database name
     "database_name": "attendance_system",
     
+    # Connection timeout in milliseconds
     "timeout": 5000,
 }
 
