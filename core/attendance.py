@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta, time
-from core.database import DatabaseManager
 
 class AttendanceManager:
     def __init__(self, db_manager):
         self.db = db_manager
+        
+        # Grace period for clock-in (15 minutes buffer)
+        self.CLOCK_IN_GRACE_PERIOD_MINUTES = 15
         
         # Shift configurations
         self.EARLY_SHIFT = {
@@ -18,9 +20,74 @@ class AttendanceManager:
             'name': 'Regular Shift (8:00 AM - 5:15 PM)'
         }
         
+        # Default minimum clock-out time (can be overridden by admin settings)
+        self.min_clock_out_time = time(17, 0)  # 5:00 PM default
+        
         # Test time override for testing purposes
         self.test_time_override = None
     
+    def update_min_clock_out_time(self, time_str):
+        """Update the minimum clock-out time from admin settings (legacy method)"""
+        try:
+            # Parse HH:MM format
+            hour, minute = map(int, time_str.split(':'))
+            self.min_clock_out_time = time(hour, minute)
+            print(f"[ATTENDANCE] Updated minimum clock-out time to {self.min_clock_out_time.strftime('%I:%M %p')}")
+        except Exception as e:
+            print(f"[ATTENDANCE] Error updating min clock-out time: {e}")
+            # Keep default if parsing fails
+            self.min_clock_out_time = time(17, 0)
+    
+    def update_shift_settings(self, early_shift_min_clockout, regular_shift_min_clockout):
+        """Update shift settings with separate times for early and regular shifts"""
+        try:
+            # Parse early shift time
+            early_hour, early_minute = map(int, early_shift_min_clockout.split(':'))
+            self.EARLY_SHIFT['clock_out_time'] = time(early_hour, early_minute)
+            
+            # Parse regular shift time
+            regular_hour, regular_minute = map(int, regular_shift_min_clockout.split(':'))
+            self.REGULAR_SHIFT['clock_out_time'] = time(regular_hour, regular_minute)
+            
+            # Update the legacy min_clock_out_time to regular shift for backward compatibility
+            self.min_clock_out_time = self.REGULAR_SHIFT['clock_out_time']
+            
+            print(f"[ATTENDANCE] Updated shift settings:")
+            print(f"  Early Shift: {self.EARLY_SHIFT['clock_out_time'].strftime('%I:%M %p')}")
+            print(f"  Regular Shift: {self.REGULAR_SHIFT['clock_out_time'].strftime('%I:%M %p')}")
+            
+        except Exception as e:
+            print(f"[ATTENDANCE] Error updating shift settings: {e}")
+            # Keep defaults if parsing fails
+            self.EARLY_SHIFT['clock_out_time'] = time(17, 0)
+            self.REGULAR_SHIFT['clock_out_time'] = time(17, 15)
+            self.min_clock_out_time = time(17, 0)
+    
+    def calculate_overtime_hours(self, clock_out_time, shift_clock_out_time):
+        """Calculate overtime hours if employee clocks out 1+ hours after shift end time"""
+        try:
+            # Convert time objects to datetime for calculation
+            today = datetime.now().date()
+            clock_out_datetime = datetime.combine(today, clock_out_time)
+            shift_end_datetime = datetime.combine(today, shift_clock_out_time)
+            
+            # Calculate the difference
+            time_diff = clock_out_datetime - shift_end_datetime
+            
+            # Convert to total hours (including fractions)
+            total_hours = time_diff.total_seconds() / 3600
+            
+            # Only count as OT if it's 1 hour or more
+            if total_hours >= 1.0:
+                # Return whole hours only (floor division)
+                return int(total_hours)
+            else:
+                return 0
+                
+        except Exception as e:
+            print(f"[ATTENDANCE] Error calculating overtime: {e}")
+            return 0
+
     def get_current_time(self):
         """Get current time, or test override time"""
         if self.test_time_override:
@@ -40,7 +107,7 @@ class AttendanceManager:
         """Clear test time override"""
         self.test_time_override = None
     
-    def determine_shift_and_type(self, employee_id, current_time=None):
+    def determine_shift_and_type(self, nric, current_time=None):
         """Determine shift type and attendance action based on arrival time and employee role"""
         if current_time is None:
             current_time = self.get_current_time()
@@ -48,14 +115,14 @@ class AttendanceManager:
         current_time_only = current_time.time()
         
         # Get employee information including role
-        employee = self.db.get_employee(employee_id)
+        employee = self.db.get_employee(nric)
         if not employee:
             return None, None, None
             
-        employee_role = employee.get('role', 'Staff')  # Default to Staff if no role specified
+        employee_role = employee.get('roles', [])  # Default to Staff if no role specified
         
         # Get today's records for this employee
-        today_records = self.get_employee_attendance_today(employee_id)
+        today_records = self.get_employee_attendance_today(nric)
         
         # Check if employee has already clocked in today
         clock_in_record = None
@@ -95,66 +162,95 @@ class AttendanceManager:
                     'name': 'Security Shift (7:00 AM - 7:00 PM)'
                 }
                 
-                if current_time_only < time(7, 0):
+                # Calculate grace period time (7:00 AM + 15 minutes = 7:15 AM)
+                grace_period_time = time(7, 15)
+                
+                if current_time_only < grace_period_time:
                     return security_shift, 'clock', 'in'
                 else:
-                    # Allow late clock in for security but mark as late
+                    # Late if after 7:15 AM (grace period expired)
                     return security_shift, 'clock', 'in_late'
             else:
-                # Staff: Original logic
+                # Staff: Original logic with grace period
                 if current_time_only < self.EARLY_SHIFT['clock_in_before']:
                     return self.EARLY_SHIFT, 'clock', 'in'
                 elif current_time_only < self.REGULAR_SHIFT['clock_in_before']:
                     return self.REGULAR_SHIFT, 'clock', 'in'
                 else:
-                    # Allow late clock in (after 8:00 AM) but mark as late
-                    return self.REGULAR_SHIFT, 'clock', 'in_late'
+                    # Calculate grace period time (8:00 AM + 15 minutes = 8:15 AM)
+                    regular_shift_with_grace = datetime.combine(
+                        datetime.today(),
+                        self.REGULAR_SHIFT['clock_in_before']
+                    ) + timedelta(minutes=self.CLOCK_IN_GRACE_PERIOD_MINUTES)
+                    grace_period_time = regular_shift_with_grace.time()
+                    
+                    if current_time_only < grace_period_time:
+                        # Within grace period - not late
+                        return self.REGULAR_SHIFT, 'clock', 'in'
+                    else:
+                        # After grace period - mark as late
+                        return self.REGULAR_SHIFT, 'clock', 'in_late'
     
-    def process_attendance(self, employee_id, method, attendance_mode, location_callback=None):
-        """Process attendance based on mode (clock/check) and current time"""
-        employee = self.db.get_employee(employee_id)
+    def process_attendance(self, nric, method, attendance_mode, location_callback=None, is_late=False, shift_name=None, emergency_override=False):
+        employee = self.db.get_employee(nric)
         if not employee:
-            return False, f"Employee {employee_id} not found"
-        
+            return False, f"Employee {nric} not found"
+
         if attendance_mode.upper() == 'CLOCK':
-            # CLOCK mode: Handle shift start/end times with time restrictions
-            current_time = self.get_current_time()
-            shift, att_type, action = self.determine_shift_and_type(employee_id, current_time)
-            
-            if action == 'in':
-                return self.clock_in_employee(employee_id, method, shift)
-            elif action == 'in_late':
-                return self.clock_in_employee(employee_id, method, shift, is_late=True)
-            elif action == 'out':
-                return self.clock_out_employee(employee_id, method, shift)
+            # If shift_name is provided (from UI Security logic), use it
+            if shift_name:
+                shift = {'name': shift_name}
             else:
-                return False, f"Clock mode not available - use CHECK mode during work hours"
-        
+                current_time = self.get_current_time()
+                shift, att_type, action = self.determine_shift_and_type(nric, current_time)
+            # If is_late is provided, use it
+            if is_late:
+                return self.clock_in_employee(nric, method, shift, is_late=True)
+            # If shift_name is provided, treat as clock in (for Security)
+            if shift_name:
+                return self.clock_in_employee(nric, method, shift, is_late=is_late)
+            # Otherwise, use normal alternating logic
+            if 'action' in locals():
+                if action == 'in':
+                    return self.clock_in_employee(nric, method, shift)
+                elif action == 'in_late':
+                    return self.clock_in_employee(nric, method, shift, is_late=True)
+                elif action == 'out':
+                    return self.clock_out_employee(nric, method, shift, emergency_override=emergency_override)
+                else:
+                    return False, f"Clock mode not available - use CHECK mode during work hours"
+            else:
+                # If emergency override is set, force clock out
+                if emergency_override:
+                    return self.clock_out_employee(nric, method, shift, emergency_override=True)
+                # Fallback: treat as clock in
+                return self.clock_in_employee(nric, method, shift)
+
         elif attendance_mode.upper() == 'CHECK':
             # CHECK mode: Simple toggle for office entry/exit without time restrictions
-            result = self.toggle_check_attendance(employee_id, method, location_callback)
+            result = self.toggle_check_attendance(nric, method, location_callback)
             # Handle both old and new return formats
             if len(result) == 3:
                 return result[0], result[1]  # success, message (ignore record_id for now)
             else:
                 return result
-        
+
         return False, "Invalid attendance mode"
     
-    def clock_in_employee(self, employee_id, method, shift, is_late=False):
+    def clock_in_employee(self, nric, method, shift, is_late=False):
         """Clock in employee for shift start"""
-        employee = self.db.get_employee(employee_id)
+        employee = self.db.get_employee(nric)
         employee_role = employee.get('role', 'Staff')
         
         # Check if already clocked in today
-        today_records = self.get_employee_attendance_today(employee_id)
+        today_records = self.get_employee_attendance_today(nric)
         for record in today_records:
             if record.get('attendance_type') == 'clock' and record['status'] == 'in':
                 return False, f"{employee['name']} ({employee_role}) is already clocked in for {shift['name']}"
         
         # Record clock-in with late flag
         current_time = self.get_current_time()
-        record_id = self.db.record_attendance(employee_id, method, "in", "clock", current_time, late=is_late)
+        record_id = self.db.record_attendance(nric, method, "in", "clock", current_time, late=is_late)
         
         # Return appropriate message based on role and timing
         if is_late:
@@ -165,13 +261,13 @@ class AttendanceManager:
         else:
             return True, f"{employee['name']} ({employee_role}) clocked in for {shift['name']}"
     
-    def clock_out_employee(self, employee_id, method, shift):
+    def clock_out_employee(self, nric, method, shift, emergency_override=False):
         """Clock out employee for shift end with role-based time restrictions"""
-        employee = self.db.get_employee(employee_id)
+        employee = self.db.get_employee(nric)
         employee_role = employee.get('role', 'Staff')
         
         # Check if clocked in today and get clock-in record
-        today_records = self.get_employee_attendance_today(employee_id)
+        today_records = self.get_employee_attendance_today(nric)
         clock_in_record = None
         for record in today_records:
             if record.get('attendance_type') == 'clock' and record['status'] == 'in':
@@ -179,6 +275,49 @@ class AttendanceManager:
                 break
         
         if not clock_in_record:
+            # For Security, check if there's a previous day night shift to clock out
+            if employee_role == 'Security':
+                from datetime import timedelta
+                prev_date = (current_time - timedelta(days=1)).date()
+                # Get yesterday's records
+                prev_start = datetime.combine(prev_date, datetime.min.time())
+                prev_end = datetime.combine(prev_date, datetime.max.time())
+                prev_records = []
+                
+                # Get all attendance records for previous day
+                all_records = self.db.get_attendance_by_date_range(prev_date.strftime('%Y-%m-%d'), prev_date.strftime('%Y-%m-%d'))
+                prev_records = [r for r in all_records if r['nric'] == nric]
+                
+                # Check for night shift clock-in without clock-out
+                night_shift_in = None
+                has_clock_out = False
+                for record in prev_records:
+                    if record.get('attendance_type') == 'clock':
+                        if record['status'] == 'in':
+                            clock_time = datetime.fromisoformat(record['timestamp']).time()
+                            if clock_time >= time(18, 0):  # Night shift
+                                night_shift_in = record
+                        elif record['status'] == 'out':
+                            has_clock_out = True
+                
+                if night_shift_in and not has_clock_out:
+                    # Allow night shift clock-out if it's 7:00 AM or later
+                    if current_time_only >= time(7, 0):
+                        # Calculate overtime for night shift
+                        min_clock_out_time = time(7, 0)
+                        overtime_hours = self.calculate_overtime_hours(current_time_only, min_clock_out_time)
+                        
+                        # Record clock-out for previous day night shift
+                        record_id = self.db.record_attendance(nric, method, "out", "clock", current_time, overtime_hours=overtime_hours)
+                        
+                        base_message = f"{employee['name']} (Security) clocked out from Night Shift (7:00 PM - 7:00 AM)"
+                        if overtime_hours > 0:
+                            base_message += f" - OT {overtime_hours} hour{'s' if overtime_hours > 1 else ''}"
+                        
+                        return True, base_message
+                    else:
+                        return False, f"Cannot clock out before 7:00 AM (Night Shift)"
+            
             return False, f"{employee['name']} ({employee_role}) hasn't clocked in today"
         
         # Check if already clocked out
@@ -191,36 +330,84 @@ class AttendanceManager:
         current_time_only = current_time.time()
         
         if employee_role == 'Security':
-            # Security: No clock-out time restrictions as per requirements
-            record_id = self.db.record_attendance(employee_id, method, "out", "clock", current_time)
-            return True, f"{employee['name']} (Security) clocked out from Security Shift"
+            # Security: Apply shift-based time restrictions
+            from datetime import datetime
+            
+            # If there's no clock_in_record, this should have been handled by previous day night shift logic
+            if not clock_in_record:
+                return False, f"{employee['name']} (Security) hasn't clocked in today"
+                
+            clock_in_time = datetime.fromisoformat(clock_in_record['timestamp']).time()
+            
+            # Determine shift and minimum clock-out time
+            if clock_in_time >= time(18, 0):  # Night shift (6:00 PM - 7:00 AM next day)
+                min_clock_out_time = time(7, 0)  # 7:00 AM next day
+                shift_name = "Night Shift (7:00 PM - 7:00 AM)"
+                # Check if current time is appropriate for night shift clock-out (skip if emergency)
+                if not emergency_override and current_time_only < min_clock_out_time:
+                    min_time_str = min_clock_out_time.strftime("%I:%M %p")
+                    return False, f"Cannot clock out before {min_time_str} ({shift_name})"
+            else:  # Day shift (6:00 AM - 7:00 PM same day)
+                min_clock_out_time = time(19, 0)  # 7:00 PM
+                shift_name = "Day Shift (7:00 AM - 7:00 PM)"
+                if not emergency_override and current_time_only < min_clock_out_time:
+                    min_time_str = min_clock_out_time.strftime("%I:%M %p")
+                    return False, f"Cannot clock out before {min_time_str} ({shift_name})"
+            
+            # Calculate overtime hours for security (or negative for early clock-out)
+            overtime_hours = self.calculate_overtime_hours(current_time_only, min_clock_out_time)
+            
+            # Record clock-out with overtime information
+            record_id = self.db.record_attendance(nric, method, "out", "clock", current_time, overtime_hours=overtime_hours)
+            
+            # Create clock out message with overtime if applicable
+            if emergency_override:
+                base_message = f"{employee['name']} (Security) 🚨 EMERGENCY CLOCK-OUT from {shift_name}"
+            else:
+                base_message = f"{employee['name']} (Security) clocked out from {shift_name}"
+                if overtime_hours > 0:
+                    base_message += f" - OT {overtime_hours} hour{'s' if overtime_hours > 1 else ''}"
+            
+            return True, base_message
         else:
             # Staff: Apply original time restrictions
             # Get clock-in time from the record
             from datetime import datetime
             clock_in_time = datetime.fromisoformat(clock_in_record['timestamp']).time()
             
-            # Determine minimum clock-out time based on clock-in time
-            if clock_in_time < time(8, 0):  # Clocked in before 8:00 AM
-                min_clock_out_time = time(17, 0)  # 5:00 PM
-                shift_name = "Early Shift"
-            else:  # Clocked in at 8:00 AM or later (including late arrivals)
-                min_clock_out_time = time(17, 15)  # 5:15 PM
-                shift_name = "Regular Shift"
+            # Determine shift type and appropriate minimum clock-out time
+            if clock_in_time < time(8, 0):  # Clocked in before 8:00 AM = Early Shift
+                shift_name = self.EARLY_SHIFT['name']
+                min_clock_out_time = self.EARLY_SHIFT['clock_out_time']
+            else:  # Clocked in at 8:00 AM or later = Regular Shift (including late arrivals)
+                shift_name = self.REGULAR_SHIFT['name']
+                min_clock_out_time = self.REGULAR_SHIFT['clock_out_time']
             
-            # Check if current time is before minimum clock-out time
-            if current_time_only < min_clock_out_time:
+            # Check if current time is before minimum clock-out time for this shift (skip if emergency)
+            if not emergency_override and current_time_only < min_clock_out_time:
                 min_time_str = min_clock_out_time.strftime("%I:%M %p")
                 return False, f"Cannot clock out before {min_time_str} ({shift_name})"
             
-            # Record clock-out
-            record_id = self.db.record_attendance(employee_id, method, "out", "clock", current_time)
-            return True, f"{employee['name']} (Staff) clocked out from {shift_name}"
+            # Calculate overtime hours (or negative for early clock-out)
+            overtime_hours = self.calculate_overtime_hours(current_time_only, min_clock_out_time)
+            
+            # Record clock-out with overtime information
+            record_id = self.db.record_attendance(nric, method, "out", "clock", current_time, overtime_hours=overtime_hours)
+            
+            # Create clock out message with overtime if applicable
+            if emergency_override:
+                base_message = f"{employee['name']} (Staff) 🚨 EMERGENCY CLOCK-OUT from {shift_name}"
+            else:
+                base_message = f"{employee['name']} (Staff) clocked out from {shift_name}"
+                if overtime_hours > 0:
+                    base_message += f" - OT {overtime_hours} hour{'s' if overtime_hours > 1 else ''}"
+            
+            return True, base_message
     
-    def toggle_check_attendance(self, employee_id, method, location_callback=None):
+    def toggle_check_attendance(self, nric, method, location_callback=None):
         """Toggle check in/out for office entry/exit during work hours"""
-        employee = self.db.get_employee(employee_id)
-        today_records = self.get_employee_attendance_today(employee_id)
+        employee = self.db.get_employee(nric)
+        today_records = self.get_employee_attendance_today(nric)
         
         # Find most recent CHECK record (ignore CLOCK records)
         last_check_record = None
@@ -236,56 +423,56 @@ class AttendanceManager:
         
         if not last_check_record:
             # First check of the day - CHECK OUT (default assumption is employee is leaving office)
-            record_id = self.db.record_attendance(employee_id, method, "out", "check", current_time)
+            record_id = self.db.record_attendance(nric, method, "out", "check", current_time)
             
             # If location callback is provided, trigger location selection
             if location_callback:
-                location_callback(record_id, employee_id)
+                location_callback(record_id, nric)
                 
             return True, f"{employee['name']} checked out of office", record_id
         else:
             # Toggle based on last check status
             if last_check_record['status'] == 'in':
                 # CHECK OUT - need location selection
-                record_id = self.db.record_attendance(employee_id, method, "out", "check", current_time)
+                record_id = self.db.record_attendance(nric, method, "out", "check", current_time)
                 
                 # If location callback is provided, trigger location selection
                 if location_callback:
-                    location_callback(record_id, employee_id)
+                    location_callback(record_id, nric)
                 
                 return True, f"{employee['name']} checked out of office", record_id
             else:
                 # CHECK IN
-                record_id = self.db.record_attendance(employee_id, method, "in", "check", current_time)
+                record_id = self.db.record_attendance(nric, method, "in", "check", current_time)
                 return True, f"{employee['name']} checked into office", record_id
     
-    def check_in_employee(self, employee_id, method="manual"):
+    def check_in_employee(self, nric, method="manual"):
         """Check in an employee"""
         # Verify employee exists
-        employee = self.db.get_employee(employee_id)
+        employee = self.db.get_employee(nric)
         if not employee:
-            return False, f"Employee {employee_id} not found"
+            return False, f"Employee {nric} not found"
         
         # Check if already checked in today
-        today_records = self.get_employee_attendance_today(employee_id)
+        today_records = self.get_employee_attendance_today(nric)
         if today_records:
             last_record = today_records[0]  # Most recent record
             if last_record['status'] == 'in':
                 return False, f"{employee['name']} is already checked in"
         
         # Record check-in
-        record_id = self.db.record_attendance(employee_id, method, "in")
+        record_id = self.db.record_attendance(nric, method, "in")
         return True, f"{employee['name']} checked in successfully"
     
-    def check_out_employee(self, employee_id, method="manual"):
+    def check_out_employee(self, nric, method="manual"):
         """Check out an employee"""
         # Verify employee exists
-        employee = self.db.get_employee(employee_id)
+        employee = self.db.get_employee(nric)
         if not employee:
-            return False, f"Employee {employee_id} not found"
+            return False, f"Employee {nric} not found"
         
         # Check if checked in today
-        today_records = self.get_employee_attendance_today(employee_id)
+        today_records = self.get_employee_attendance_today(nric)
         if not today_records:
             return False, f"{employee['name']} hasn't checked in today"
         
@@ -294,34 +481,34 @@ class AttendanceManager:
             return False, f"{employee['name']} is already checked out"
         
         # Record check-out
-        record_id = self.db.record_attendance(employee_id, method, "out")
+        record_id = self.db.record_attendance(nric, method, "out")
         return True, f"{employee['name']} checked out successfully"
     
-    def toggle_attendance(self, employee_id, method="manual"):
+    def toggle_attendance(self, nric, method="manual"):
         """Toggle attendance (check in if out, check out if in)"""
-        employee = self.db.get_employee(employee_id)
+        employee = self.db.get_employee(nric)
         if not employee:
-            return False, f"Employee {employee_id} not found"
+            return False, f"Employee {nric} not found"
         
-        today_records = self.get_employee_attendance_today(employee_id)
+        today_records = self.get_employee_attendance_today(nric)
         
         if not today_records:
             # No records today, check in
-            return self.check_in_employee(employee_id, method)
+            return self.check_in_employee(nric, method)
         else:
             last_record = today_records[0]
             if last_record['status'] == 'in':
                 # Last status was in, check out
-                return self.check_out_employee(employee_id, method)
+                return self.check_out_employee(nric, method)
             else:
                 # Last status was out, check in
-                return self.check_in_employee(employee_id, method)
+                return self.check_in_employee(nric, method)
     
-    def get_employee_attendance_today(self, employee_id):
+    def get_employee_attendance_today(self, nric):
         """Get today's attendance records for a specific employee"""
         all_today = self.db.get_attendance_today()
-        return [record for record in all_today if record['employee_id'] == employee_id]
-    
+        return [record for record in all_today if record['nric'] == nric]
+
     def get_attendance_summary_today(self):
         """Get summary of today's attendance"""
         attendance_records = self.db.get_attendance_today()
@@ -329,7 +516,7 @@ class AttendanceManager:
         # Group by employee
         employee_status = {}
         for record in attendance_records:
-            emp_id = record['employee_id']
+            emp_id = record['nric']
             if emp_id not in employee_status:
                 employee_status[emp_id] = {
                     'name': record['name'],
@@ -365,7 +552,7 @@ class AttendanceManager:
             date = record['timestamp'].split(' ')[0]  # Extract date part
             if date not in daily_attendance:
                 daily_attendance[date] = set()
-            daily_attendance[date].add(record['employee_id'])
+            daily_attendance[date].add(record['nric'])
         
         # Convert sets to counts
         daily_counts = {date: len(employees) for date, employees in daily_attendance.items()}
@@ -399,7 +586,7 @@ class AttendanceManager:
         # Group by employee
         employee_reports = {}
         for record in records:
-            emp_id = record['employee_id']
+            emp_id = record['nric']
             if emp_id not in employee_reports:
                 employee_reports[emp_id] = {
                     'name': record['name'],

@@ -10,9 +10,9 @@ import threading
 from .location_manager import LocationManager
 
 class LocationSelector:
-    def __init__(self, parent, employee_id: str, callback: Callable[[Dict], None]):
+    def __init__(self, parent, nric: str, callback: Callable[[Dict], None]):
         self.parent = parent
-        self.employee_id = employee_id
+        self.nric = nric
         self.callback = callback
         self.location_manager = LocationManager()
         self.selected_location = None
@@ -21,6 +21,13 @@ class LocationSelector:
         self.search_results = []
         self.search_thread = None
         self.search_delay_timer = None
+        
+        # Emergency clock-out state
+        self.is_emergency_clockout = False
+        self.emergency_reason = ""
+        
+        # Checkout type state
+        self.checkout_type = "work"  # Default to "work"
         
         self.create_dialog()
     
@@ -35,7 +42,7 @@ class LocationSelector:
         
         # Center dialog
         self.dialog.geometry("+%d+%d" % (
-            self.parent.winfo_rootx() + 200,
+            self.parent.winfo_rootx() + 450,
             self.parent.winfo_rooty() + 100
         ))
         
@@ -104,7 +111,7 @@ class LocationSelector:
         self.main_frame.grid_columnconfigure(0, weight=1)
         self.main_frame.grid_rowconfigure(1, weight=1)
         
-        # Tab buttons - only Search Results and Manual Input
+        # Tab buttons - Search Results, Manual Input, and Emergency Clock-Out
         tab_frame = ctk.CTkFrame(self.main_frame)
         tab_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
         
@@ -123,6 +130,16 @@ class LocationSelector:
             width=140
         )
         self.manual_input_btn.pack(side="left", padx=5)
+        
+        self.emergency_btn = ctk.CTkButton(
+            tab_frame,
+            text="🚨 EMERGENCY CLOCK-OUT",
+            command=lambda: self.switch_tab("emergency"),
+            width=200,
+            fg_color=("orange", "darkorange"),
+            hover_color=("red", "darkred")
+        )
+        self.emergency_btn.pack(side="left", padx=5)
         
         # Content area
         self.content_frame = ctk.CTkScrollableFrame(self.main_frame)
@@ -184,20 +201,29 @@ class LocationSelector:
         # Update button colors
         buttons = {
             "search": self.search_results_btn,
-            "manual": self.manual_input_btn
+            "manual": self.manual_input_btn,
+            "emergency": self.emergency_btn
         }
         
         for name, btn in buttons.items():
             if name == tab_name:
-                btn.configure(fg_color=("blue", "darkblue"))
+                if name == "emergency":
+                    btn.configure(fg_color=("red", "darkred"))
+                else:
+                    btn.configure(fg_color=("blue", "darkblue"))
             else:
-                btn.configure(fg_color=("gray70", "gray30"))
+                if name == "emergency":
+                    btn.configure(fg_color=("orange", "darkorange"))
+                else:
+                    btn.configure(fg_color=("gray70", "gray30"))
         
         # Load content for selected tab
         if tab_name == "search":
             self.display_search_results()
         elif tab_name == "manual":
             self.show_manual_input()
+        elif tab_name == "emergency":
+            self.show_emergency_clockout()
     
     def load_initial_content(self):
         """Load initial content (search instructions)"""
@@ -296,6 +322,38 @@ Or switch to Manual Input to type your location directly."""
         self.manual_address_entry.pack(fill="x", pady=(0, 20))
         self.manual_address_entry.bind('<KeyRelease>', self.on_manual_input_changed)
         
+        # Checkout type selection
+        type_label = ctk.CTkLabel(
+            manual_frame,
+            text="Checkout Type:",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w"
+        )
+        type_label.pack(fill="x", pady=(10, 5))
+        
+        type_container = ctk.CTkFrame(manual_frame, fg_color="transparent")
+        type_container.pack(fill="x", pady=(0, 10))
+        
+        self.checkout_type_var = tk.StringVar(value="work")
+        
+        work_radio = ctk.CTkRadioButton(
+            type_container,
+            text="Work",
+            variable=self.checkout_type_var,
+            value="work",
+            font=ctk.CTkFont(size=15)
+        )
+        work_radio.pack(side="left", padx=(0, 20))
+        
+        personal_radio = ctk.CTkRadioButton(
+            type_container,
+            text="Personal",
+            variable=self.checkout_type_var,
+            value="personal",
+            font=ctk.CTkFont(size=15)
+        )
+        personal_radio.pack(side="left")
+        
         # Example text
         example_label = ctk.CTkLabel(
             manual_frame,
@@ -345,6 +403,136 @@ Or switch to Manual Input to type your location directly."""
             
             self.selected_location = manual_location
             self.confirm_selection()
+    
+    def show_emergency_clockout(self):
+        """Show emergency clock-out interface"""
+        self.clear_content()
+        
+        # Emergency frame
+        emergency_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+        emergency_frame.pack(fill="x", padx=20, pady=30)
+        
+        # Warning icon and title
+        title_label = ctk.CTkLabel(
+            emergency_frame,
+            text="🚨 EMERGENCY CLOCK-OUT",
+            font=ctk.CTkFont(size=20, weight="bold"),
+            text_color="red"
+        )
+        title_label.pack(pady=(0, 10))
+        
+        # Warning message
+        warning_label = ctk.CTkLabel(
+            emergency_frame,
+            text="⚠️ This will immediately CLOCK YOU OUT and end your workday,\neven if you haven't reached the standard clock-out time.",
+            font=ctk.CTkFont(size=13),
+            text_color="orange",
+            justify="center"
+        )
+        warning_label.pack(pady=(0, 20))
+        
+        # Divider
+        divider = ctk.CTkFrame(emergency_frame, height=2, fg_color="gray")
+        divider.pack(fill="x", pady=10)
+        
+        # Location input
+        location_label = ctk.CTkLabel(
+            emergency_frame,
+            text="Where are you going? *",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w",
+            text_color="red"
+        )
+        location_label.pack(fill="x", pady=(10, 5))
+        
+        self.emergency_location_entry = ctk.CTkEntry(
+            emergency_frame,
+            placeholder_text="Enter location (e.g., Hospital, Home, Personal Emergency)",
+            font=ctk.CTkFont(size=14),
+            height=40
+        )
+        self.emergency_location_entry.pack(fill="x", pady=(0, 15))
+        self.emergency_location_entry.bind('<KeyRelease>', self.on_emergency_input_changed)
+        
+        # Emergency reason input
+        reason_label = ctk.CTkLabel(
+            emergency_frame,
+            text="Emergency Reason: *",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w",
+            text_color="red"
+        )
+        reason_label.pack(fill="x", pady=(0, 5))
+        
+        self.emergency_reason_entry = ctk.CTkTextbox(
+            emergency_frame,
+            height=100,
+            font=ctk.CTkFont(size=13)
+        )
+        self.emergency_reason_entry.pack(fill="x", pady=(0, 15))
+        self.emergency_reason_entry.bind('<KeyRelease>', self.on_emergency_input_changed)
+        
+        # Helper text
+        helper_label = ctk.CTkLabel(
+            emergency_frame,
+            text="Please provide a brief explanation of your emergency situation.\nExample: 'Family emergency', 'Medical appointment', 'Personal urgent matter'",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+            justify="left"
+        )
+        helper_label.pack(pady=(0, 20))
+        
+        # Important notice
+        notice_frame = ctk.CTkFrame(emergency_frame, fg_color=("yellow", "orange"))
+        notice_frame.pack(fill="x", pady=10)
+        
+        notice_label = ctk.CTkLabel(
+            notice_frame,
+            text="⚠️ IMPORTANT: This emergency clock-out will be logged and may require\nmanager review. Use only for genuine emergencies.",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="black",
+            justify="center"
+        )
+        notice_label.pack(padx=15, pady=15)
+    
+    def on_emergency_input_changed(self, event):
+        """Handle emergency input changes"""
+        location = self.emergency_location_entry.get().strip()
+        reason = self.emergency_reason_entry.get("1.0", "end-1c").strip()
+        
+        # Enable confirm button if both fields are filled
+        if len(location) >= 3 and len(reason) >= 5:
+            self.is_emergency_clockout = True
+            self.emergency_reason = reason
+            
+            # Auto-select emergency location
+            emergency_location = {
+                'name': location,
+                'address': location,
+                'latitude': None,
+                'longitude': None,
+                'emergency': True,
+                'emergency_reason': reason
+            }
+            self.select_location(emergency_location)
+            
+            # Update confirm button text for emergency
+            self.confirm_btn.configure(
+                text="⚠️ Confirm Emergency Clock-Out",
+                state="normal",
+                fg_color=("red", "darkred")
+            )
+        else:
+            # Reset if inputs are insufficient
+            self.is_emergency_clockout = False
+            self.emergency_reason = ""
+            self.selected_location = None
+            self.selection_label.configure(text="Please fill in all required fields", text_color="orange")
+            self.confirm_btn.configure(
+                text="Confirm Location",
+                state="disabled",
+                fg_color=("gray70", "gray30")
+            )
     
     def on_search_changed(self, event):
         """Handle search text changes with debouncing"""
@@ -430,6 +618,42 @@ Or switch to Manual Input to type your location directly."""
             )
             no_results_label.pack(pady=30)
             return
+        
+        # Add checkout type selection at the top for search results
+        type_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+        type_frame.pack(fill="x", padx=20, pady=(10, 15))
+        
+        type_label = ctk.CTkLabel(
+            type_frame,
+            text="Checkout Type:",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w"
+        )
+        type_label.pack(side="left", padx=(0, 15))
+        
+        self.checkout_type_var = tk.StringVar(value="work")
+        
+        work_radio = ctk.CTkRadioButton(
+            type_frame,
+            text="Work",
+            variable=self.checkout_type_var,
+            value="work",
+            font=ctk.CTkFont(size=13)
+        )
+        work_radio.pack(side="left", padx=(0, 15))
+        
+        personal_radio = ctk.CTkRadioButton(
+            type_frame,
+            text="Personal",
+            variable=self.checkout_type_var,
+            value="personal",
+            font=ctk.CTkFont(size=13)
+        )
+        personal_radio.pack(side="left")
+        
+        # Divider
+        divider = ctk.CTkFrame(self.content_frame, height=2, fg_color="gray")
+        divider.pack(fill="x", padx=20, pady=(0, 10))
         
         # Display locations
         for i, location in enumerate(locations):
@@ -532,10 +756,19 @@ Or switch to Manual Input to type your location directly."""
     def confirm_selection(self):
         """Confirm location selection"""
         if self.selected_location:
+            # Add checkout type to location data
+            self.selected_location['type'] = self.checkout_type_var.get()
+            
+            # Add emergency flag to location data if this is emergency clock-out
+            if self.is_emergency_clockout:
+                self.selected_location['emergency_clockout'] = True
+                self.selected_location['emergency_reason'] = self.emergency_reason
+                print(f"[EMERGENCY DEBUG] Emergency clock-out confirmed: {self.selected_location['name']}, Reason: {self.emergency_reason}")
+            
+            print(f"[CHECKOUT DEBUG] Checkout type selected: {self.selected_location['type']}")
             self.callback(self.selected_location)
             self.dialog.destroy()
     
     def cancel_selection(self):
         """Cancel location selection"""
-        self.callback(None)
         self.dialog.destroy()

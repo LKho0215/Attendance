@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
 import customtkinter as ctk
 import tkinter as tk
+import tkinter.ttk as ttk
 from tkinter import messagebox
 import cv2
 from PIL import Image, ImageTk
@@ -13,7 +13,8 @@ import re
 import numpy as np
 import traceback
 import pygame
-from datetime import datetime, timedelta
+import time
+from datetime import datetime, timedelta, time as dt_time
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 
@@ -60,9 +61,8 @@ class SimpleKioskApp:
             import ctypes
             # Tell Windows this app is DPI-aware
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
-            print("[INIT DEBUG] Successfully set DPI awareness")
         except:
-            print("[INIT DEBUG] Could not set DPI awareness (not critical)")
+            pass
         
         self.root = ctk.CTk()
         self.root.title("Attendance Kiosk")
@@ -71,16 +71,10 @@ class SimpleKioskApp:
         self.setup_kiosk_mode()
         
         # Initialize core components
-        print("[INIT DEBUG] Initializing core components...")
         try:
             self.db = MongoDBManager()
-            print("[INIT DEBUG] MongoDB manager initialized")
-            
             self.attendance_manager = AttendanceManager(self.db)
-            print("[INIT DEBUG] Attendance manager initialized")
-            
             self.location_manager = MongoLocationManager(self.db)
-            print("[INIT DEBUG] MongoDB location manager initialized")
             
         except Exception as e:
             print(f"[INIT ERROR] Failed to initialize MongoDB: {e}")
@@ -121,7 +115,7 @@ class SimpleKioskApp:
         # GUI state variables
         self.camera_active = False
         self.current_mode = "auto"  # auto, manual
-        self.attendance_mode = "CLOCK"  # CLOCK or CHECK
+        self.attendance_mode = "UNIFIED"  # Unified attendance system
         self.auto_timeout = 3  # seconds to show result
         self.last_history_update = 0  # for periodic updates
         
@@ -130,6 +124,15 @@ class SimpleKioskApp:
         self.reg_camera_active = False  # Registration camera preview active
         self.reg_capture_active = False  # Registration capture process active
         
+        # Face detection warm-up system
+        self.face_warmup_enabled = True  # Enable/disable warm-up system
+        self.face_warmup_frames = 3  # Number of consecutive frames required before recognition
+        self.face_warmup_stability_threshold = 0.1  # Maximum allowed face movement (as fraction of face size)
+        self.face_detection_history = {}  # Track detected faces across frames
+        self.frame_counter = 0  # Frame counter for tracking
+        self.last_recognition_time = 0  # Prevent too frequent recognitions
+        self.recognition_cooldown = 2.0  # Seconds between recognitions for same face
+        
         # Create GUI
         self.create_interface()
         
@@ -137,8 +140,15 @@ class SimpleKioskApp:
         self.audio_enabled = True  # Can be toggled via settings if needed
         print(f"[AUDIO] Audio feedback initialized: {AUDIO_AVAILABLE}")
         
+        # Load shift settings from database (managed via web admin)
+        self.load_shift_settings_from_db()
+        
+        # Start auto-refresh for shift settings (every 20 seconds)
+        self.start_settings_auto_refresh(interval_seconds=20)
+
         # Set initial mode appearance
-        self.set_attendance_mode("CLOCK")
+        # Initialize unified attendance system
+        self.update_attendance_history()
         
         # Load known faces
         self.load_known_faces()
@@ -370,9 +380,9 @@ class SimpleKioskApp:
         # Header
         self.create_header()
         
-        # Content area with camera and controls
+        # Content area with camera and controls - reduced padding for more space
         self.content_frame = ctk.CTkFrame(self.main_frame)
-        self.content_frame.pack(fill="both", expand=True, padx=20, pady=10)
+        self.content_frame.pack(fill="both", expand=True, padx=20, pady=(5, 10))
         
         # Left side - Camera feed (smaller, fixed width)
         self.camera_frame = ctk.CTkFrame(self.content_frame, width=480, height=400)
@@ -381,23 +391,77 @@ class SimpleKioskApp:
         
         self.camera_label = ctk.CTkLabel(
             self.camera_frame, 
-            text="📷 Camera Off\n\nPress Numpad +\nto activate camera for recognition\n\nManual Recognition Mode",
+            text="📷 Camera Off\n\nPress Numpad +\nto activate camera for recognition",
             font=ctk.CTkFont(size=20)
         )
         self.camera_label.pack(expand=True, padx=15, pady=15)
         
-        # Add employee registration button below camera
-        self.register_btn = ctk.CTkButton(
-            self.camera_frame,
-            text="👤 REGISTER NEW EMPLOYEE (R)",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            width=420,
-            height=40,
-            fg_color=("blue", "navy"),
-            hover_color=("darkblue", "lightblue"),
-            command=self.show_employee_registration_dialog
+        # Group Check Toggle
+        self.group_toggle_frame = ctk.CTkFrame(self.camera_frame)
+        self.group_toggle_frame.pack(fill="x", padx=15, pady=(0, 10))
+        
+        # Create a frame for the switch and label
+        switch_container = ctk.CTkFrame(self.group_toggle_frame, fg_color="transparent")
+        switch_container.pack(pady=10)
+        
+        # Label for the switch
+        switch_label = ctk.CTkLabel(
+            switch_container,
+            text="👥 Group Check:",
+            font=ctk.CTkFont(size=14, weight="bold")
         )
-        self.register_btn.pack(side="bottom", padx=15, pady=15)
+        switch_label.pack(side="left", padx=(0, 10))
+        
+        # Switch toggle
+        self.group_check_var = ctk.BooleanVar(value=False)
+        self.group_toggle = ctk.CTkSwitch(
+            switch_container,
+            text="",
+            variable=self.group_check_var,
+            command=self.toggle_group_mode,
+            width=50,
+            height=25
+        )
+        self.group_toggle.pack(side="left")
+        
+        # Group List Frame (initially hidden)
+        self.group_list_frame = ctk.CTkFrame(self.camera_frame)
+        
+        # Scrollable group list
+        self.group_scroll_frame = ctk.CTkScrollableFrame(
+            self.group_list_frame,
+            height=120,
+        )
+        self.group_scroll_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        # Group action buttons
+        self.group_buttons_frame = ctk.CTkFrame(self.group_list_frame)
+        self.group_buttons_frame.pack(fill="x", padx=10, pady=5)
+        
+        self.process_group_btn = ctk.CTkButton(
+            self.group_buttons_frame,
+            text="Check Out",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self.process_group_checkout,
+            fg_color="green",
+            hover_color="darkgreen",
+            height=35
+        )
+        self.process_group_btn.pack(side="left", padx=5, pady=5)
+        
+        self.clear_group_btn = ctk.CTkButton(
+            self.group_buttons_frame,
+            text="Clear List",
+            font=ctk.CTkFont(size=12),
+            command=self.clear_group_list,
+            fg_color="red",
+            hover_color="darkred",
+            height=35
+        )
+        self.clear_group_btn.pack(side="right", padx=5, pady=5)
+        
+        # Initialize group data
+        self.group_employees = []
         
         # Right side - Attendance history (larger, expandable)
         self.control_frame = ctk.CTkFrame(self.content_frame)
@@ -409,170 +473,50 @@ class SimpleKioskApp:
         self.create_status_area()
     
     def create_header(self):
-        """Create header with title and time"""
-        header_frame = ctk.CTkFrame(self.main_frame, height=120)
-        header_frame.pack(fill="x", padx=30, pady=20)
+        """Create header with time display only"""
+        header_frame = ctk.CTkFrame(self.main_frame, height=60)
+        header_frame.pack(fill="x", padx=20, pady=10)
         header_frame.pack_propagate(False)
-        
-        # Title
-        title_label = ctk.CTkLabel(
+
+        self.title_label = ctk.CTkLabel(
             header_frame,
             text="ATTENDANCE SYSTEM",
-            font=ctk.CTkFont(size=42, weight="bold")
+            font=ctk.CTkFont(size=24, weight="bold")
         )
-        title_label.pack(side="left", padx=30, pady=30)
+        self.title_label.pack(side="left", padx=20, pady=15)
         
-        # Time display
         self.time_label = ctk.CTkLabel(
             header_frame,
             text="",
-            font=ctk.CTkFont(size=24)
+            font=ctk.CTkFont(size=24, weight="bold")
         )
-        self.time_label.pack(side="right", padx=30, pady=30)
+        self.time_label.pack(side="right", padx=20, pady=15)
     
     def create_controls(self):
-        """Create control panels with separate interfaces for CLOCK and CHECK modes"""
-        # Mode selection frame at top
-        mode_selection_frame = ctk.CTkFrame(self.control_frame, height=80)
-        mode_selection_frame.pack(fill="x", padx=10, pady=10)
-        mode_selection_frame.pack_propagate(False)
-        
-        mode_title = ctk.CTkLabel(
-            mode_selection_frame,
-            text="SELECT MODE:",
-            font=ctk.CTkFont(size=18, weight="bold")
-        )
-        mode_title.pack(side="left", padx=20, pady=20)
-        
-        # Mode buttons
-        self.clock_btn = ctk.CTkButton(
-            mode_selection_frame,
-            text="🕐 CLOCK MODE (1)",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            width=180,
-            height=50,
-            command=lambda: self.set_attendance_mode("CLOCK")
-        )
-        self.clock_btn.pack(side="left", padx=10, pady=15)
-        
-        self.check_btn = ctk.CTkButton(
-            mode_selection_frame,
-            text="✅ CHECK MODE (2)",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            width=180,
-            height=50,
-            command=lambda: self.set_attendance_mode("CHECK")
-        )
-        self.check_btn.pack(side="left", padx=10, pady=15)
-        
-        # Create interface panels (initially hidden)
-        self.create_clock_interface()
-        self.create_check_interface()
+        """Create unified attendance interface"""
+        # Create the unified attendance interface directly
+        self.create_unified_interface()
         
         # Load initial attendance data
         self.update_attendance_history()
     
-    def create_clock_interface(self):
-        """Create the CLOCK mode interface for shift management"""
-        self.clock_interface = ctk.CTkFrame(self.control_frame)
-        # Don't pack it yet - it will be shown when CLOCK mode is selected
+    def create_unified_interface(self):
+        """Create unified attendance interface for all types of attendance"""
+        self.unified_interface = ctk.CTkFrame(self.control_frame)
+        self.unified_interface.pack(fill="both", expand=True, padx=10, pady=10)
         
-        # CLOCK mode title
-        clock_title_frame = ctk.CTkFrame(self.clock_interface, fg_color="transparent")
-        clock_title_frame.pack(fill="x", padx=10, pady=10)
         
-        clock_title = ctk.CTkLabel(
-            clock_title_frame,
-            text="🕐 SHIFT MANAGEMENT",
-            font=ctk.CTkFont(size=28, weight="bold"),
-            text_color=("green", "lightgreen")
-        )
-        clock_title.pack()
-        
-        # CLOCK mode attendance history
-        self.clock_history_frame = ctk.CTkScrollableFrame(
-            self.clock_interface,
+        # Unified attendance history - larger area for better visibility
+        self.unified_history_frame = ctk.CTkScrollableFrame(
+            self.unified_interface,
             width=600,
-            height=520,
+            height=700,
             fg_color=("gray95", "gray10"),
             border_width=2,
-            border_color=("green", "darkgreen")
+            border_color=("#8A2BE2", "#9370DB")  # BlueViolet and MediumSlateBlue
         )
-        self.clock_history_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        self.unified_history_frame.pack(fill="both", expand=True, padx=10, pady=(5, 10)) 
         
-        # CLOCK mode controls
-        clock_controls = ctk.CTkFrame(self.clock_interface, height=80)
-        clock_controls.pack(fill="x", padx=10, pady=10)
-        clock_controls.pack_propagate(False)
-        
-        self.clock_manual_btn = ctk.CTkButton(
-            clock_controls,
-            text="⌨️ MANUAL CLOCK ENTRY (Enter)",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            width=250,
-            height=50,
-            command=self.show_manual_entry
-        )
-        self.clock_manual_btn.pack(side="left", padx=10, pady=15)
-        
-        self.clock_status_label = ctk.CTkLabel(
-            clock_controls,
-            text="Scan face or QR code to CLOCK IN/OUT",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color="green"
-        )
-        self.clock_status_label.pack(side="right", padx=20, pady=15)
-    
-    def create_check_interface(self):
-        """Create the CHECK mode interface for office entry/exit"""
-        self.check_interface = ctk.CTkFrame(self.control_frame)
-        # Don't pack it yet - it will be shown when CHECK mode is selected
-        
-        # CHECK mode title
-        check_title_frame = ctk.CTkFrame(self.check_interface, fg_color="transparent")
-        check_title_frame.pack(fill="x", padx=10, pady=10)
-        
-        check_title = ctk.CTkLabel(
-            check_title_frame,
-            text="✅ OFFICE ENTRY/EXIT",
-            font=ctk.CTkFont(size=28, weight="bold"),
-            text_color=("blue", "lightblue")
-        )
-        check_title.pack()
-        
-        # CHECK mode attendance history
-        self.check_history_frame = ctk.CTkScrollableFrame(
-            self.check_interface,
-            width=600,
-            height=520,
-            fg_color=("gray95", "gray10"),
-            border_width=2,
-            border_color=("blue", "darkblue")
-        )
-        self.check_history_frame.pack(fill="both", expand=True, padx=10, pady=10)
-        
-        # CHECK mode controls
-        check_controls = ctk.CTkFrame(self.check_interface, height=80)
-        check_controls.pack(fill="x", padx=10, pady=10)
-        check_controls.pack_propagate(False)
-        
-        self.check_manual_btn = ctk.CTkButton(
-            check_controls,
-            text="⌨️ MANUAL CHECK ENTRY (Enter)",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            width=250,
-            height=50,
-            command=self.show_manual_entry
-        )
-        self.check_manual_btn.pack(side="left", padx=10, pady=15)
-        
-        self.check_status_label = ctk.CTkLabel(
-            check_controls,
-            text="Scan face or QR code to CHECK IN/OUT",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color="blue"
-        )
-        self.check_status_label.pack(side="right", padx=20, pady=15)
     
     def create_status_area(self):
         """Create status and message area"""
@@ -589,15 +533,6 @@ class SimpleKioskApp:
         )
         self.status_label.pack(pady=15)
         
-        # Help information
-        help_text = "⌨️ SHORTCUTS: 1=Clock Mode • 2=Check Mode • Enter=Manual Entry • +=Activate Camera • *=Export • -=Exit"
-        help_label = ctk.CTkLabel(
-            self.status_frame,
-            text=help_text,
-            font=ctk.CTkFont(size=12),
-            text_color="gray"
-        )
-        help_label.pack(pady=5)
         
         # Message area (initially hidden)
         self.message_frame = ctk.CTkFrame(self.main_frame)
@@ -611,7 +546,6 @@ class SimpleKioskApp:
     def setup_keyboard_shortcuts(self):
         """Setup keyboard shortcuts"""
         # Original shortcuts (for full keyboards)
-        self.root.bind('<F1>', lambda e: self.show_help())                 # F1 for help
         self.root.bind('<F4>', lambda e: self.toggle_kiosk_mode())          # F4 to toggle fullscreen
         self.root.bind('<Escape>', lambda e: self.clear_message())         # ESC to clear messages
         self.root.bind('<Alt-F4>', lambda e: self.quit_app())
@@ -625,18 +559,8 @@ class SimpleKioskApp:
         self.root.bind('<asterisk>', lambda e: self.export_daily_csv())     # Regular * (export CSV)
         
         # Additional convenient shortcuts
-        self.root.bind('<Return>', lambda e: self.show_manual_entry())      # Enter key
+        self.root.bind('<Return>', lambda e: self.show_manual_entry())      # Enter key - manual entry only
         self.root.bind('<KP_Enter>', lambda e: self.show_manual_entry())    # Numpad Enter
-        
-        # Attendance mode switching
-        self.root.bind('<Key-1>', lambda e: self.set_attendance_mode("CLOCK"))  # 1 for CLOCK mode
-        self.root.bind('<KP_1>', lambda e: self.set_attendance_mode("CLOCK"))   # Numpad 1 for CLOCK mode
-        self.root.bind('<Key-2>', lambda e: self.set_attendance_mode("CHECK"))  # 2 for CHECK mode
-        self.root.bind('<KP_2>', lambda e: self.set_attendance_mode("CHECK"))   # Numpad 2 for CHECK mode
-        
-        # Employee registration
-        self.root.bind('<Key-r>', lambda e: self.show_employee_registration_dialog())  # R for registration
-        self.root.bind('<Key-R>', lambda e: self.show_employee_registration_dialog())  # R for registration
         
         # Focus on root to capture keys - use multiple methods for reliability
         self.root.focus_set()
@@ -645,8 +569,6 @@ class SimpleKioskApp:
         # Make the window always stay on top and grab focus
         self.root.attributes('-topmost', True)
         self.root.lift()
-        
-        print("[KEYBOARD DEBUG] Keyboard shortcuts configured and focus set")
     
     def toggle_kiosk_mode(self):
         """Toggle between fullscreen and windowed mode (for debugging)"""
@@ -664,1371 +586,90 @@ class SimpleKioskApp:
         except Exception as e:
             print(f"[KIOSK DEBUG] Toggle failed: {e}")
     
-    def show_help(self):
-        """Show help message"""
-        help_text = ("KIOSK ATTENDANCE SYSTEM\n\n" +
-                    "MANUAL RECOGNITION MODE:\n" +
-                    "● Press + (Plus) to activate camera for face recognition\n" +
-                    "● Or enter your Employee ID and press ENTER\n" +
-                    "● Or scan QR/Barcode with Employee ID\n\n" +
-                    "WORKFLOW:\n" +
-                    "1. Press + to turn ON camera\n" +
-                    "2. Position your face for recognition\n" +
-                    "3. Confirm recognition in dialog\n" +
-                    "4. Camera turns OFF automatically\n" +
-                    "5. If wrong recognition, camera reactivates for retry\n\n" +
-                    "CONTROLS:\n" +
-                    "• + = Activate Camera for Recognition\n" +
-                    "• Enter = Manual Entry\n" +
-                    "• R = Register New Employee\n" +
-                    "• * = Export Today's Records (with confirmation)\n" +
-                    "• F1 = Show Help\n" +
-                    "• F4 = Toggle Fullscreen\n" +
-                    "• - = Exit (with confirmation)\n" +
-                    "• ESC = Clear Messages")
-        
-        self.message_frame.pack(fill="x", padx=30, pady=10)
-        self.message_label.configure(text=help_text, text_color="cyan")
-        self.status_label.configure(text="● HELP DISPLAYED", text_color="cyan")
-        
-        # Auto-clear after 10 seconds
-        self.root.after(10000, self.clear_message)
-    
-    def show_employee_registration_dialog(self):
-        """Show employee registration dialog with camera preview"""
+    def load_shift_settings_from_db(self):
+        """Load shift settings from database (managed via web admin panel)"""
         try:
-            # *** CRITICAL: Stop main camera COMPLETELY when registration button is pressed ***
-            print("[REG DEBUG] Registration button pressed - stopping main camera completely")
-            
-            # Remember if camera was active before registration
-            self.camera_was_active_before_registration = self.camera_active
-            print(f"[REG DEBUG] Camera was active before registration: {self.camera_was_active_before_registration}")
-            
-            # Stop the main camera and update display
-            if self.camera_active:
-                self.stop_camera()
-                print("[REG DEBUG] Main camera stopped for registration")
-            
-            self.main_camera_paused = True  # Set flag to prevent camera restart during registration
-            
-            # Also stop face recognition background processing temporarily
-            if hasattr(self, 'face_recognition') and self.face_recognition:
-                print("[REG DEBUG] Pausing background face recognition during registration")
-            
-            # Create registration dialog
-            dialog = tk.Toplevel(self.root)
-            dialog.title("Employee Registration")
-            dialog.geometry("950x650")  # Even larger to accommodate bigger camera preview
-            dialog.transient(self.root)
-            dialog.grab_set()
-            dialog.resizable(False, False)
-            
-            # Center dialog on screen
-            dialog.update_idletasks()
-            x = (dialog.winfo_screenwidth() // 2) - (950 // 2)
-            y = (dialog.winfo_screenheight() // 2) - (650 // 2)
-            dialog.geometry(f"950x650+{x}+{y}")
-            
-            dialog.configure(bg='#f0f8ff')
-            
-            # Ensure dialog closes properly and resumes camera
-            def on_dialog_close():
-                print("[REG DEBUG] Dialog close event triggered")
-                self.close_registration_dialog(dialog)
-            
-            dialog.protocol("WM_DELETE_WINDOW", on_dialog_close)
-            
-            # Title
-            title_label = tk.Label(
-                dialog,
-                text="👤 REGISTER NEW EMPLOYEE",
-                font=("Arial", 18, "bold"),
-                bg='#f0f8ff',
-                fg='#2E86C1'
-            )
-            title_label.pack(pady=10)
-            
-            # Main container frame
-            main_container = tk.Frame(dialog, bg='#f0f8ff')
-            main_container.pack(fill="both", expand=True, padx=20, pady=10)
-            
-            # Left side - Form
-            form_frame = tk.Frame(main_container, bg='#f0f8ff', width=350)
-            form_frame.pack(side="left", fill="y", padx=10)
-            form_frame.pack_propagate(False)
-            
-            # Right side - Camera preview (larger to accommodate bigger camera feed)
-            camera_frame = tk.Frame(main_container, bg='#f0f8ff', width=520, height=450)
-            camera_frame.pack(side="right", fill="y", padx=10)
-            camera_frame.pack_propagate(False)
-            
-            # Form title
-            form_title = tk.Label(
-                form_frame,
-                text="📝 EMPLOYEE DETAILS",
-                font=("Arial", 14, "bold"),
-                bg='#f0f8ff',
-                fg='#2E86C1'
-            )
-            form_title.grid(row=0, column=0, columnspan=2, pady=(10, 20))
-            
-            # Employee ID
-            tk.Label(form_frame, text="Employee ID:", font=("Arial", 12, "bold"),
-                    bg='#f0f8ff', fg='#2E86C1').grid(row=1, column=0, sticky="e", padx=10, pady=10)
-            self.reg_employee_id = tk.Entry(form_frame, font=("Arial", 12), width=18)
-            self.reg_employee_id.grid(row=1, column=1, padx=10, pady=10)
-            
-            # Employee Name
-            tk.Label(form_frame, text="Full Name:", font=("Arial", 12, "bold"),
-                    bg='#f0f8ff', fg='#2E86C1').grid(row=2, column=0, sticky="e", padx=10, pady=10)
-            self.reg_employee_name = tk.Entry(form_frame, font=("Arial", 12), width=18)
-            self.reg_employee_name.grid(row=2, column=1, padx=10, pady=10)
-            
-            # Department
-            tk.Label(form_frame, text="Department:", font=("Arial", 12, "bold"),
-                    bg='#f0f8ff', fg='#2E86C1').grid(row=3, column=0, sticky="e", padx=10, pady=10)
-            self.reg_department = tk.Entry(form_frame, font=("Arial", 12), width=18)
-            self.reg_department.grid(row=3, column=1, padx=10, pady=10)
-            
-            # Role Selection
-            tk.Label(form_frame, text="Role:", font=("Arial", 12, "bold"),
-                    bg='#f0f8ff', fg='#2E86C1').grid(row=4, column=0, sticky="e", padx=10, pady=10)
-            
-            # Create role dropdown
-            self.reg_role_var = tk.StringVar(value="Staff")
-            role_frame = tk.Frame(form_frame, bg='#f0f8ff')
-            role_frame.grid(row=4, column=1, padx=10, pady=10, sticky="w")
-            
-            role_options = ["Staff", "Security"]
-            self.reg_role_menu = tk.OptionMenu(role_frame, self.reg_role_var, *role_options)
-            self.reg_role_menu.config(
-                font=("Arial", 11),
-                bg='white',
-                fg='#2E86C1',
-                width=15,
-                borderwidth=1,
-                relief="solid"
-            )
-            self.reg_role_menu.pack(side="left")
-            
-            
-            # Status label
-            self.reg_status_label = tk.Label(
-                form_frame,
-                text="Fill in the details above, then click 'Start Face Capture'",
-                font=("Arial", 10),
-                bg='#f0f8ff',
-                fg='#666666',
-                wraplength=320
-            )
-            self.reg_status_label.grid(row=5, column=0, columnspan=2, pady=15)
-            
-            # Camera preview setup
-            camera_title = tk.Label(
-                camera_frame,
-                text="📷 CAMERA PREVIEW",
-                font=("Arial", 14, "bold"),
-                bg='#f0f8ff',
-                fg='#2E86C1'
-            )
-            camera_title.pack(pady=(10, 5))
-            
-            # Camera display label - no fixed size to allow image to control dimensions
-            self.reg_camera_label = tk.Label(
-                camera_frame,
-                text="Camera will start when capture begins",
-                font=("Arial", 12),
-                bg='#333333',
-                fg='white'
-            )
-            self.reg_camera_label.pack(pady=10)
-            
-            # Buttons frame (at bottom)
-            button_frame = tk.Frame(dialog, bg='#f0f8ff')
-            button_frame.pack(side="bottom", pady=20)
-            
-            # Start capture button
-            self.capture_btn = tk.Button(
-                button_frame,
-                text="START FACE CAPTURE",
-                font=("Arial", 14, "bold"),
-                bg='#28a745',
-                fg='white',
-                width=20,
-                height=2,
-                command=lambda: self.start_face_capture_with_preview(dialog)
-            )
-            self.capture_btn.pack(side="left", padx=10)
-            
-            # Cancel button
-            cancel_btn = tk.Button(
-                button_frame,
-                text="CANCEL",
-                font=("Arial", 12),
-                bg='#dc3545',
-                fg='white',
-                width=20,
-                height=2,
-                command=lambda: self.close_registration_dialog(dialog)
-            )
-            cancel_btn.pack(side="left", padx=10)
-            
-            # Bind keyboard shortcuts
-            dialog.bind('<Return>', lambda e: self.start_face_capture_with_preview(dialog))
-            dialog.bind('<Escape>', lambda e: self.close_registration_dialog(dialog))
-            
-            # Focus on employee ID field
-            self.reg_employee_id.focus_set()
-            
-            # Store dialog reference and initialize variables
-            self.registration_dialog = dialog
-            self.reg_camera_active = False
-            self.reg_capture_active = False
-            
-        except Exception as e:
-            print(f"[REG DEBUG] Error showing registration dialog: {e}")
-            # Resume main camera if dialog creation failed
-            self.main_camera_paused = False
-            print("[REG DEBUG] Main camera resumed after dialog creation error")
-            self.show_error_message(f"❌ Registration error: {str(e)}")
-    
-    def close_registration_dialog(self, dialog):
-        """Close registration dialog and resume main camera"""
-        try:
-            print("[REG DEBUG] Closing registration dialog and resuming main camera")
-            
-            # Stop registration camera activities
-            self.reg_camera_active = False
-            self.reg_capture_active = False
-            
-            # Stop the registration camera
-            if hasattr(self, 'camera_manager') and self.camera_manager:
-                self.camera_manager.stop_camera()
-                print("[REG DEBUG] Registration camera stopped")
-            
-            # Resume main camera processing flag
-            if hasattr(self, 'main_camera_paused'):
-                self.main_camera_paused = False
-                print("[REG DEBUG] Main camera pause flag cleared")
-            
-            # Only restart camera if it was active BEFORE registration started
-            if hasattr(self, 'camera_was_active_before_registration') and self.camera_was_active_before_registration:
-                print("[REG DEBUG] Restoring camera to previous active state")
-                self.start_camera()
+            # Try to load existing settings from database
+            settings = self.db.get_admin_settings()
+            if settings:
+                # Load shift times from database
+                self.early_shift_min_clockout = settings.get('early_shift_min_clockout', '17:00')  # 5:00 PM
+                self.regular_shift_min_clockout = settings.get('regular_shift_min_clockout', '17:15')  # 5:15 PM
+                
+                # Face recognition warm-up settings
+                self.face_warmup_enabled = settings.get('face_warmup_enabled', True)
+                self.face_warmup_frames = settings.get('face_warmup_frames', 3)
+                self.face_warmup_stability_threshold = settings.get('face_warmup_stability_threshold', 0.1)
+                self.recognition_cooldown = settings.get('recognition_cooldown', 2.0)
+                
+                print(f"[SETTINGS] Loaded shift settings - Early: {self.early_shift_min_clockout}, Regular: {self.regular_shift_min_clockout}")
             else:
-                print("[REG DEBUG] Camera was not active before registration - keeping it off")
+                # Set defaults if no settings found
+                self.early_shift_min_clockout = '17:00'  # Early shift: 7:45 AM - 5:00 PM
+                self.regular_shift_min_clockout = '17:15'  # Regular shift: 8:00 AM - 5:15 PM
+                
+                # Face recognition warm-up settings defaults
+                self.face_warmup_enabled = True
+                self.face_warmup_frames = 3
+                self.face_warmup_stability_threshold = 0.1
+                self.recognition_cooldown = 2.0
+                
+                print(f"[SETTINGS] Using default shift settings - Early: {self.early_shift_min_clockout}, Regular: {self.regular_shift_min_clockout}")
             
-            # Clean up the registration state flag
-            if hasattr(self, 'camera_was_active_before_registration'):
-                delattr(self, 'camera_was_active_before_registration')
-            
-            # Resume background face recognition
-            if hasattr(self, 'face_recognition') and self.face_recognition:
-                print("[REG DEBUG] Background face recognition resumed")
-            
-            # Update camera display based on whether camera was previously active
-            if hasattr(self, 'camera_label'):
-                if hasattr(self, 'camera_was_active_before_registration') and self.camera_was_active_before_registration:
-                    self.camera_label.configure(text="📷 Camera Resuming...")
-                    print("[REG DEBUG] Camera label updated - resuming camera")
-                else:
-                    self.camera_label.configure(text="📷 Camera Off\n\nPress Numpad +\nto activate camera for recognition\n\nManual Recognition Mode")
-                    print("[REG DEBUG] Camera label updated - camera remains off")
-            
-            dialog.destroy()
-            
-            # Force focus back to main window
-            self.root.focus_force()
-            print("[REG DEBUG] Focus returned to main window")
+            # Update attendance manager with loaded settings
+            self.update_attendance_manager_settings()
             
         except Exception as e:
-            print(f"[REG DEBUG] Error closing dialog: {e}")
-            # Ensure main camera is resumed even if there's an error
-            if hasattr(self, 'main_camera_paused'):
-                self.main_camera_paused = False
-                print("[REG DEBUG] Main camera flag force-cleared after error")
+            print(f"[SETTINGS] Error loading settings, using defaults: {e}")
+            # Fallback defaults
+            self.early_shift_min_clockout = '17:00'
+            self.regular_shift_min_clockout = '17:15'
             
-            # Clean up the registration state flag even on error
-            if hasattr(self, 'camera_was_active_before_registration'):
-                delattr(self, 'camera_was_active_before_registration')
-                print("[REG DEBUG] Registration state flag cleaned up after error")
+            # Face recognition warm-up settings defaults
+            self.face_warmup_enabled = True
+            self.face_warmup_frames = 3
+            self.face_warmup_stability_threshold = 0.1
+            self.recognition_cooldown = 2.0
             
-            # Do NOT auto-restart camera on error - let user control it
-            print("[REG DEBUG] Registration dialog error handled - camera control returned to user")
+            # Still try to update attendance manager
+            self.update_attendance_manager_settings()
     
-    def start_face_capture_with_preview(self, dialog):
-        """Start face capture with live camera preview and bounding boxes"""
+    def update_attendance_manager_settings(self):
+        """Update the attendance manager with shift settings from database"""
         try:
-            print("[REG DEBUG] Start face capture button pressed")
-            
-            # Validate form inputs
-            employee_id = self.reg_employee_id.get().strip()
-            employee_name = self.reg_employee_name.get().strip()
-            department = self.reg_department.get().strip()
-            role = self.reg_role_var.get()  # Get selected role
-            
-            if not employee_id or not employee_name or not department:
-                self.reg_status_label.configure(
-                    text="❌ Please fill in all fields",
-                    fg='red'
+            if hasattr(self.attendance_manager, 'update_shift_settings'):
+                # New method that supports dual shift configuration
+                self.attendance_manager.update_shift_settings(
+                    early_shift_min_clockout=self.early_shift_min_clockout,
+                    regular_shift_min_clockout=self.regular_shift_min_clockout
                 )
-                return
-            
-            # Check if employee ID already exists
-            if self.db.get_employee(employee_id):
-                self.reg_status_label.configure(
-                    text="❌ Employee ID already exists",
-                    fg='red'
-                )
-                return
-            
-            # Check if camera manager is available (we'll start our own registration camera)
-            if not hasattr(self, 'camera_manager') or not self.camera_manager:
-                self.reg_status_label.configure(
-                    text="❌ Camera manager not available.",
-                    fg='red'
-                )
-                return
-            
-            # Start registration camera (independent of main camera)
-            print("[REG DEBUG] Starting dedicated registration camera")
-            if not self.camera_manager.start_camera():
-                self.reg_status_label.configure(
-                    text="❌ Cannot start registration camera. Please check camera connection.",
-                    fg='red'
-                )
-                return
-            
-            print("[REG DEBUG] All validations passed, starting capture process")
-            
-            # Update status and start preview (main camera already paused when dialog opened)
-            self.reg_status_label.configure(
-                text="📷 Starting camera preview... Position yourself in the frame",
-                fg='blue'
-            )
-            
-            # Disable form inputs during capture
-            self.reg_employee_id.configure(state='disabled')
-            self.reg_employee_name.configure(state='disabled')
-            self.reg_department.configure(state='disabled')
-            self.reg_role_menu.configure(state='disabled')
-            self.capture_btn.configure(state='disabled', text="📷 CAPTURING...")
-            
-            # Start camera preview for registration
-            self.reg_camera_active = True
-            self.start_registration_camera_preview()
-            
-            # Start actual capture process after a short delay
-            dialog.after(2000, lambda: self.start_face_capture_process(employee_id, employee_name, department, role, dialog))
-            
-        except Exception as e:
-            print(f"[REG DEBUG] Error starting face capture: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            # Re-enable form on error
-            try:
-                self.reg_employee_id.configure(state='normal')
-                self.reg_employee_name.configure(state='normal')
-                self.reg_department.configure(state='normal')
-                self.reg_role_menu.configure(state='normal')
-                self.capture_btn.configure(state='normal', text="📷 START FACE CAPTURE")
-            except:
-                pass
-                
-            self.reg_status_label.configure(
-                text=f"❌ Capture error: {str(e)}",
-                fg='red'
-            )
-    
-    def start_registration_camera_preview(self):
-        """Start camera preview with face detection bounding boxes"""
-        try:
-            if not self.reg_camera_active:
-                return
-                
-            if hasattr(self, 'camera_manager') and self.camera_manager and self.camera_manager.cap is not None:
-                # Check if camera is still open
-                if not self.camera_manager.cap.isOpened():
-                    print("[REG DEBUG] Camera connection lost during preview")
-                    self.reg_camera_active = False
-                    return
-                
-                ret, frame = self.camera_manager.cap.read()
-                
-                if ret and frame is not None:
-                    # Create a copy for drawing
-                    display_frame = frame.copy()
-                    height, width = frame.shape[:2]
-                    display_width, display_height = 480, 360
-                    
-                    # Use ultra light detection for fast real-time feedback
-                    detected_faces = []
-                    if hasattr(self, 'ultra_light_detector') and self.ultra_light_detector:
-                        try:
-                            detected_faces = self.ultra_light_detector.detect_faces_for_attendance(frame)
-                            print(f"[REG ULTRA] Detected {len(detected_faces) if detected_faces else 0} faces in registration")
-                        except Exception as ultra_error:
-                            print(f"[REG ULTRA] Ultra light detection error: {ultra_error}")
-                    
-                    # Draw face detection results
-                    if detected_faces:
-                        # Get the best face for registration
-                        best_face = self.ultra_light_detector.get_best_face(detected_faces)
-                        
-                        for face_data in detected_faces:
-                            x1, y1, x2, y2 = face_data['bbox']
-                            confidence = face_data['confidence']
-                            
-                            # Scale coordinates to display frame
-                            display_x1 = int(x1 * display_width / width)
-                            display_y1 = int(y1 * display_height / height)
-                            display_x2 = int(x2 * display_width / width)
-                            display_y2 = int(y2 * display_height / height)
-                            
-                            # Determine if this is the best face
-                            is_best = best_face and face_data['id'] == best_face['id']
-                            
-                            # Color coding - green for good detection, yellow for others
-                            if confidence > 0.7 and is_best:
-                                color = (0, 255, 0)  # Green for good quality
-                                label = f"GOOD QUALITY ({confidence:.2f})"
-                                thickness = 3
-                            elif is_best:
-                                color = (0, 255, 255)  # Yellow for acceptable
-                                label = f"FACE DETECTED ({confidence:.2f})"
-                                thickness = 2
-                            else:
-                                color = (255, 255, 0)  # Light blue for other faces
-                                label = f"Other Face ({confidence:.2f})"
-                                thickness = 1
-                            
-                            # Draw bounding box
-                            cv2.rectangle(display_frame, (display_x1, display_y1), (display_x2, display_y2), color, thickness)
-                            
-                            # Draw label with background
-                            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
-                            cv2.rectangle(display_frame, 
-                                         (display_x1, display_y1 - label_size[1] - 10), 
-                                         (display_x1 + label_size[0], display_y1), 
-                                         color, -1)
-                            cv2.putText(display_frame, label, (display_x1, display_y1 - 5), 
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
-                        
-                        # Add instruction text at bottom
-                        cv2.putText(display_frame, "FACE DETECTED - READY FOR CAPTURE", (30, display_height - 20), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    else:
-                        # No faces detected - add instruction text
-                        cv2.putText(display_frame, "POSITION FACE IN FRAME", (30, 40), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                        cv2.putText(display_frame, "Look directly at the camera", (30, display_height - 20), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1)
-                    
-                    # Add FPS indicator
-                    if hasattr(self, 'ultra_light_detector') and self.ultra_light_detector:
-                        fps = self.ultra_light_detector.get_performance_stats()['fps']
-                        cv2.putText(display_frame, f"FPS: {fps:.1f}", (display_width - 100, 30), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-                    
-                    try:
-                        # Resize and convert for display - larger size for better visibility
-                        display_frame = cv2.resize(display_frame, (display_width, display_height))
-                        display_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
-                        
-                        # Convert to PhotoImage
-                        from PIL import Image, ImageTk
-                        image = Image.fromarray(display_frame)
-                        photo = ImageTk.PhotoImage(image)
-                        
-                        # Update camera display
-                        if hasattr(self, 'reg_camera_label') and self.reg_camera_label.winfo_exists():
-                            self.reg_camera_label.configure(image=photo)
-                            self.reg_camera_label.image = photo  # Keep a reference
-                    except Exception as display_error:
-                        print(f"[REG DEBUG] Display error: {display_error}")
-                        # Don't crash on display errors
-            
-            # Schedule next frame update
-            if self.reg_camera_active and hasattr(self, 'registration_dialog'):
-                try:
-                    self.registration_dialog.after(20, self.start_registration_camera_preview)  # 50 FPS for smoother registration
-                except:
-                    # Dialog might be destroyed
-                    self.reg_camera_active = False
-                
-        except Exception as e:
-            print(f"[REG DEBUG] Camera preview error: {e}")
-            import traceback
-            traceback.print_exc()
-            # Continue trying if camera is still active, but with shorter delay for smoother recovery
-            if self.reg_camera_active and hasattr(self, 'registration_dialog'):
-                try:
-                    self.registration_dialog.after(50, self.start_registration_camera_preview)  # 20 FPS fallback
-                except:
-                    self.reg_camera_active = False
-    
-    def start_face_capture_process(self, employee_id, employee_name, department, role, dialog):
-        """Start the actual face capture process"""
-        try:
-            print(f"[REG DEBUG] Starting face capture process for {employee_id} ({role})")
-            
-            # Validate that we still have camera access
-            if not hasattr(self, 'camera_manager') or not self.camera_manager or not self.camera_manager.cap:
-                self.reg_status_label.configure(
-                    text="❌ Camera lost during process. Please try again.",
-                    fg='red'
-                )
-                return
-            
-            self.reg_capture_active = True
-            
-            # Update status
-            self.reg_status_label.configure(
-                text="🎯 Capturing face vectors... Hold still!",
-                fg='green'
-            )
-            
-            # Start capture in separate thread with better error handling
-            try:
-                capture_thread = threading.Thread(
-                    target=self.capture_face_vectors_with_preview,
-                    args=(employee_id, employee_name, department, role, dialog),
-                    daemon=True
-                )
-                capture_thread.start()
-                print("[REG DEBUG] Capture thread started successfully")
-                
-            except Exception as thread_error:
-                print(f"[REG DEBUG] Error starting capture thread: {thread_error}")
-                self.reg_capture_active = False
-                self.reg_status_label.configure(
-                    text=f"❌ Threading error: {str(thread_error)}",
-                    fg='red'
-                )
-            
-        except Exception as e:
-            print(f"[REG DEBUG] Error starting capture process: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            self.reg_capture_active = False
-            self.reg_status_label.configure(
-                text=f"❌ Capture failed: {str(e)}",
-                fg='red'
-            )
-    
-    def start_face_capture(self, dialog):
-        """Start face capture process for employee registration"""
-        try:
-            # Validate form inputs
-            employee_id = self.reg_employee_id.get().strip()
-            employee_name = self.reg_employee_name.get().strip()
-            department = self.reg_department.get().strip()
-            
-            if not employee_id or not employee_name or not department:
-                self.reg_status_label.configure(
-                    text="❌ Please fill in all fields",
-                    fg='red'
-                )
-                return
-            
-            # Check if employee ID already exists
-            if self.db.get_employee(employee_id):
-                self.reg_status_label.configure(
-                    text="❌ Employee ID already exists",
-                    fg='red'
-                )
-                return
-            
-            # Check if camera is available
-            if not self.camera_active:
-                self.reg_status_label.configure(
-                    text="❌ Camera is not active. Please enable camera first.",
-                    fg='red'
-                )
-                return
-            
-            # Update status
-            self.reg_status_label.configure(
-                text="📷 Starting face capture... Look at the camera!",
-                fg='blue'
-            )
-            
-            # Disable form inputs during capture
-            self.reg_employee_id.configure(state='disabled')
-            self.reg_employee_name.configure(state='disabled')
-            self.reg_department.configure(state='disabled')
-            self.capture_btn.configure(state='disabled', text="📷 CAPTURING...")
-            
-            # Start face capture in separate thread
-            capture_thread = threading.Thread(
-                target=self.capture_face_vectors,
-                args=(employee_id, employee_name, department, dialog),
-                daemon=True
-            )
-            capture_thread.start()
-            
-        except Exception as e:
-            print(f"[REG DEBUG] Error starting face capture: {e}")
-            self.reg_status_label.configure(
-                text=f"❌ Capture error: {str(e)}",
-                fg='red'
-            )
-    
-    def capture_face_vectors(self, employee_id, employee_name, department, dialog):
-        """Capture multiple face images and create face vectors with visual feedback"""
-        try:
-            print(f"[REG DEBUG] Starting enhanced face capture for {employee_id}")
-            
-            captured_frames = []  # Store frames for robust embedding creation
-            captured_vectors = []
-            capture_count = 0
-            max_captures = 15  # Increased to capture more frames for better quality
-            capture_duration = 5  # 5 seconds total capture time
-            min_face_size = 60  # Minimum face size for quality
-            
-            start_time = time.time()
-            
-            # Temporarily stop the preview to show capture feedback
-            original_preview_state = self.reg_camera_active
-            self.reg_camera_active = False
-            
-            while capture_count < max_captures and (time.time() - start_time) < capture_duration:
-                if hasattr(self, 'camera_manager') and self.camera_manager.cap is not None:
-                    ret, frame = self.camera_manager.cap.read()
-                    
-                    if ret and frame is not None:
-                        # Create display frame for visual feedback
-                        display_frame = frame.copy()
-                        height, width = frame.shape[:2]
-                        display_width, display_height = 480, 360
-                        
-                        # Try to detect and validate face quality using ultra light detection
-                        face_quality_good = False
-                        best_face_data = None
-                        
-                        if hasattr(self, 'ultra_light_detector') and self.ultra_light_detector:
-                            try:
-                                detected_faces = self.ultra_light_detector.detect_faces_for_attendance(frame)
-                                if detected_faces:
-                                    face_detected = True
-                                    best_face = self.ultra_light_detector.get_best_face(detected_faces)
-                                    
-                                    if best_face:
-                                        best_face_data = best_face
-                                        x1, y1, x2, y2 = best_face['bbox']
-                                        face_width = x2 - x1
-                                        face_height = y2 - y1
-                                        confidence = best_face['confidence']
-                                        
-                                        # Quality checks
-                                        if (face_width >= min_face_size and 
-                                            face_height >= min_face_size and 
-                                            confidence >= 0.8 and
-                                            face_width < width * 0.8 and  # Not too large (too close)
-                                            face_height < height * 0.8):
-                                            face_quality_good = True
-                                    
-                                    # Draw detection box
-                                    for face_data in detected_faces:
-                                        x1, y1, x2, y2 = face_data['bbox']
-                                        confidence = face_data['confidence']
-                                        is_best = best_face and face_data['id'] == best_face['id']
-                                        
-                                        # Scale coordinates to display frame
-                                        display_x1 = int(x1 * display_width / width)
-                                        display_y1 = int(y1 * display_height / height)
-                                        display_x2 = int(x2 * display_width / width)
-                                        display_y2 = int(y2 * display_height / height)
-                                        
-                                        # Color coding for capture feedback
-                                        if face_quality_good and is_best:
-                                            color = (0, 255, 0)  # Green for high quality
-                                            thickness = 3
-                                        elif is_best:
-                                            color = (0, 255, 255)  # Yellow for medium quality
-                                            thickness = 2
-                                        else:
-                                            color = (0, 165, 255)  # Orange for detected faces
-                                            thickness = 1
-                                        
-                                        # Draw bounding box
-                                        cv2.rectangle(display_frame, (display_x1, display_y1), (display_x2, display_y2), color, thickness)
-                                        
-                                        # Show quality and vectorization status
-                                        if is_best:
-                                            if face_quality_good:
-                                                label = f"HIGH QUALITY - CAPTURING {capture_count}/{max_captures}"
-                                            else:
-                                                label = f"ADJUSTING POSITION..."
-                                            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-                                            cv2.rectangle(display_frame, 
-                                                         (display_x1, display_y1 - label_size[1] - 15), 
-                                                         (display_x1 + label_size[0], display_y1), 
-                                                         color, -1)
-                                            cv2.putText(display_frame, label, (display_x1, display_y1 - 5), 
-                                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-                            except Exception as ultra_error:
-                                print(f"[REG CAPTURE] Ultra detection error: {ultra_error}")
-                        
-                        # Capture frame if quality is good
-                        if face_quality_good and len(captured_frames) < max_captures:
-                            captured_frames.append(frame.copy())
-                            capture_count += 1
-                            
-                            # Show success feedback on display
-                            cv2.putText(display_frame, f"✓ FRAME {capture_count} CAPTURED!", (30, display_height - 40), 
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-                            
-                            # Update status on UI thread
-                            progress_text = f"📸 Capturing frames... {capture_count}/{max_captures} high-quality frames captured"
-                            self.root.after(0, lambda: self.reg_status_label.configure(
-                                text=progress_text, fg='green'
-                            ))
-                            
-                            print(f"[REG DEBUG] Captured high-quality frame {capture_count}/{max_captures}")
-                            
-                            # Small delay between captures to get different poses
-                            time.sleep(0.2)
-                        else:
-                            # Provide feedback on why frame wasn't captured
-                            if not face_detected:
-                                feedback = "NO FACE DETECTED"
-                                color = (0, 0, 255)  # Red
-                            elif not face_quality_good:
-                                feedback = "ADJUSTING FOR BETTER QUALITY..."
-                                color = (0, 255, 255)  # Yellow
-                            else:
-                                feedback = f"ENOUGH FRAMES CAPTURED ({capture_count})"
-                                color = (0, 255, 0)  # Green
-                                
-                            cv2.putText(display_frame, feedback, (30, display_height - 40), 
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-                        
-                        # Add progress bar
-                        progress_width = int((capture_count / max_captures) * (display_width - 60))
-                        cv2.rectangle(display_frame, (30, display_height - 20), (display_width - 30, display_height - 10), (100, 100, 100), -1)
-                        if progress_width > 0:
-                            cv2.rectangle(display_frame, (30, display_height - 20), (30 + progress_width, display_height - 10), (0, 255, 0), -1)
-                        
-                        # Update camera display with capture feedback
-                        try:
-                            display_frame = cv2.resize(display_frame, (display_width, display_height))
-                            display_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
-                            
-                            from PIL import Image, ImageTk
-                            image = Image.fromarray(display_frame)
-                            photo = ImageTk.PhotoImage(image)
-                            
-                            if hasattr(self, 'reg_camera_label') and self.reg_camera_label.winfo_exists():
-                                self.reg_camera_label.configure(image=photo)
-                                self.reg_camera_label.image = photo
-                        except Exception as display_error:
-                            print(f"[REG CAPTURE] Display error: {display_error}")
-                        
-                        # Small delay between captures
-                        time.sleep(0.2)
-                
-                time.sleep(0.1)  # Small delay to prevent excessive CPU usage
-            
-            # Restore preview state
-            self.reg_camera_active = original_preview_state
-            
-            # Process captured frames to create robust embedding
-            if len(captured_frames) >= 5:  # Need at least 5 good quality frames
-                # Update status to show processing
-                self.root.after(0, lambda: self.reg_status_label.configure(
-                    text=f"🧠 Creating robust face embedding from {len(captured_frames)} frames...",
-                    fg='blue'
-                ))
-                
-                # Create robust embedding using the enhanced method
-                robust_embedding = self.face_recognition.create_robust_face_embedding(captured_frames)
-                
-                if robust_embedding is not None:
-                    # Update status to show database saving
-                    self.root.after(0, lambda: self.reg_status_label.configure(
-                        text=f"💾 Saving to database... (robust embedding from {len(captured_frames)} frames)",
-                        fg='blue'
-                    ))
-                    
-                    # Save employee to database
-                    success = self.db.add_employee_with_face_vector(
-                        employee_id=employee_id,
-                        name=employee_name,
-                        face_vector=robust_embedding.tolist(),
-                        department=department
-                    )
-                    
-                    if success:
-                        # Update status on UI thread
-                        self.root.after(0, lambda: self.reg_status_label.configure(
-                            text=f"✅ Employee registered successfully! (ArcFace robust embedding from {len(captured_frames)} frames)",
-                            fg='green'
-                        ))
-                        
-                        print(f"[REG DEBUG] Employee {employee_id} registered with robust ArcFace embedding from {len(captured_frames)} frames")
-                        
-                        # Close dialog after 3 seconds
-                        self.root.after(3000, dialog.destroy)
-                        
-                        # Show success message
-                        self.root.after(100, lambda: self.show_success_message(
-                            f"👤 Employee {employee_name} registered successfully with high-accuracy ArcFace embedding!"
-                        ))
-                        
-                        # Reload face recognition data
-                        self.root.after(500, self.load_known_faces)
-                        
-                    else:
-                        self.root.after(0, lambda: self.reg_status_label.configure(
-                            text="❌ Database error - failed to save employee",
-                            fg='red'
-                        ))
-                else:
-                    self.root.after(0, lambda: self.reg_status_label.configure(
-                        text="❌ Failed to create face embedding - please try again",
-                        fg='red'
-                    ))
+                print(f"[SETTINGS] Updated attendance manager with shift settings - Early: {self.early_shift_min_clockout}, Regular: {self.regular_shift_min_clockout}")
+            elif hasattr(self.attendance_manager, 'update_min_clock_out_time'):
+                # Legacy support - use regular shift time as default
+                self.attendance_manager.update_min_clock_out_time(self.regular_shift_min_clockout)
+                print(f"[SETTINGS] Updated attendance manager with regular shift time (legacy): {self.regular_shift_min_clockout}")
             else:
-                # Not enough high-quality frames captured
-                self.root.after(0, lambda: self.reg_status_label.configure(
-                    text=f"❌ Could not capture enough high-quality frames ({len(captured_frames)}/5 minimum). Please try again.",
-                    fg='red'
-                ))
-            
-            # Re-enable form on UI thread
-            self.root.after(0, lambda: [
-                self.reg_employee_id.configure(state='normal'),
-                self.reg_employee_name.configure(state='normal'),
-                self.reg_department.configure(state='normal'),
-                self.capture_btn.configure(state='normal', text="📷 START FACE CAPTURE")
-            ])
-                
+                print("[SETTINGS] Attendance manager doesn't support settings update")
         except Exception as e:
-            print(f"[REG DEBUG] Error during face capture: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            # Restore preview state
-            if 'original_preview_state' in locals():
-                self.reg_camera_active = original_preview_state
-            
-            # Show error on UI thread
-            self.root.after(0, lambda: self.reg_status_label.configure(
-                text=f"❌ Capture failed: {str(e)}",
-                fg='red'
-            ))
-            
-            # Re-enable form on UI thread
-            self.root.after(0, lambda: [
-                self.reg_employee_id.configure(state='normal'),
-                self.reg_employee_name.configure(state='normal'),
-                self.reg_department.configure(state='normal'),
-                self.capture_btn.configure(state='normal', text="📷 START FACE CAPTURE")
-            ])
-                
-        except Exception as e:
-            print(f"[REG DEBUG] Error during face capture: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            # Restore preview state
-            if 'original_preview_state' in locals():
-                self.reg_camera_active = original_preview_state
-            
-            # Show error on UI thread
-            self.root.after(0, lambda: self.reg_status_label.configure(
-                text=f"❌ Capture failed: {str(e)}",
-                fg='red'
-            ))
-            
-            # Re-enable form on UI thread
-            self.root.after(0, lambda: [
-                self.reg_employee_id.configure(state='normal'),
-                self.reg_employee_name.configure(state='normal'),
-                self.reg_department.configure(state='normal'),
-                self.capture_btn.configure(state='normal', text="📷 START FACE CAPTURE")
-            ])
-                
-        except Exception as e:
-            print(f"[REG DEBUG] Error during face capture: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            # Show error on UI thread
-            self.root.after(0, lambda: self.reg_status_label.configure(
-                text=f"❌ Capture failed: {str(e)}",
-                fg='red'
-            ))
-            
-            # Re-enable form on UI thread
-            self.root.after(0, lambda: [
-                self.reg_employee_id.configure(state='normal'),
-                self.reg_employee_name.configure(state='normal'),
-                self.reg_department.configure(state='normal'),
-                self.capture_btn.configure(state='normal', text="📷 START FACE CAPTURE")
-            ])
+            print(f"[SETTINGS] Error updating attendance manager: {e}")
     
-    def capture_face_vectors_with_preview(self, employee_id, employee_name, department, role, dialog):
-        """Improved face capture with guided instructions for better accuracy"""
-        try:
-            import numpy as np
-            print(f"[IMPROVED REG] Starting guided face capture for {employee_id} ({role})")
-            
-            # Pause background processing
-            print("[IMPROVED REG] Pausing background face processing during registration")
-            self.face_recognition.stop_background_processing()
-            
-            # Define guided instructions for diverse face capture
-            capture_instructions = [
-                "Look straight at the camera with a NEUTRAL expression",
-                "Turn your head slightly to the LEFT (keep looking at camera)",
-                "Turn your head slightly to the RIGHT (keep looking at camera)",
-                "Look straight and SMILE naturally",
-                "Look straight with a SERIOUS expression",
-                "Tilt your head slightly UP (chin up a bit)",
-                "Tilt your head slightly DOWN (chin down a bit)",
-                "Look straight again - FINAL CAPTURE"
-            ]
-            
-            captured_vectors = []
-            total_instructions = len(capture_instructions)
-            
-            # Process each instruction
-            for instruction_idx, instruction in enumerate(capture_instructions):
-                if not self.reg_capture_active or not self.reg_camera_active:
-                    break
-                
-                progress = f"{instruction_idx + 1}/{total_instructions}"
-                
-                # Update UI with current instruction
-                def update_instruction_ui(progress=progress, instruction=instruction):
-                    try:
-                        if hasattr(self, 'reg_status_label') and self.reg_status_label.winfo_exists():
-                            self.reg_status_label.configure(
-                                text=f"📋 {progress}: {instruction}",
-                                fg='blue'
-                            )
-                        if hasattr(self, 'reg_camera_label') and self.reg_camera_label.winfo_exists():
-                            self.reg_camera_label.configure(
-                                text=f"📋 INSTRUCTION {progress}\n\n{instruction}\n\nGet ready...",
-                                bg='#007bff',
-                                fg='white'
-                            )
-                    except:
-                        pass
-                
-                self.root.after(0, update_instruction_ui)
-                
-                # Give user time to read and position (3 seconds)
-                time.sleep(3.0)
-                
-                # Update UI to show capturing
-                def update_capturing_ui(progress=progress):
-                    try:
-                        if hasattr(self, 'reg_status_label') and self.reg_status_label.winfo_exists():
-                            self.reg_status_label.configure(
-                                text=f"📸 {progress}: Capturing... Hold still!",
-                                fg='orange'
-                            )
-                        if hasattr(self, 'reg_camera_label') and self.reg_camera_label.winfo_exists():
-                            self.reg_camera_label.configure(
-                                text=f"📸 CAPTURING {progress}\n\nHOLD STILL!\n\nCapturing face...",
-                                bg='#fd7e14',
-                                fg='white'
-                            )
-                    except:
-                        pass
-                
-                self.root.after(0, update_capturing_ui)
-                
-                # Attempt to capture face vector for this pose
-                success = self._capture_single_pose_improved(instruction)
-                
-                if success:
-                    captured_vectors.append(success)
-                    
-                    # Update success UI
-                    def update_success_ui(progress=progress):
-                        try:
-                            if hasattr(self, 'reg_status_label') and self.reg_status_label.winfo_exists():
-                                self.reg_status_label.configure(
-                                    text=f"✅ {progress}: Captured! Moving to next pose...",
-                                    fg='green'
-                                )
-                        except:
-                            pass
-                    
-                    self.root.after(0, update_success_ui)
-                    time.sleep(1.5)  # Brief pause before next instruction
-                    
-                else:
-                    # Retry once
-                    def update_retry_ui(progress=progress):
-                        try:
-                            if hasattr(self, 'reg_status_label') and self.reg_status_label.winfo_exists():
-                                self.reg_status_label.configure(
-                                    text=f"⚠️ {progress}: Retrying capture...",
-                                    fg='orange'
-                                )
-                        except:
-                            pass
-                    
-                    self.root.after(0, update_retry_ui)
-                    time.sleep(1.0)
-                    
-                    success = self._capture_single_pose_improved(instruction)
-                    if success:
-                        captured_vectors.append(success)
-                    else:
-                        print(f"[IMPROVED REG] Skipping pose: {instruction}")
-            
-            # Stop camera preview
-            self.reg_camera_active = False
-            self.reg_capture_active = False
-            
-            print(f"[IMPROVED REG] Capture completed. Total vectors: {len(captured_vectors)}")
-            
-            # Process results with weighted averaging
-            if len(captured_vectors) >= 3:  # Need at least 3 good captures
-                def update_processing_status():
-                    try:
-                        if hasattr(self, 'reg_status_label') and self.reg_status_label.winfo_exists():
-                            self.reg_status_label.configure(text="🔄 Processing diverse face data...", fg='blue')
-                    except:
-                        pass
-                
-                self.root.after(0, update_processing_status)
-                
-                # Create weighted average - give more weight to front-facing captures
-                vectors = []
-                weights = []
-                
-                for item in captured_vectors:
-                    vectors.append(item['vector'])
-                    instruction = item['instruction'].lower()
-                    if 'straight' in instruction or 'neutral' in instruction:
-                        weights.append(1.5)  # Higher weight for straight/neutral views
-                    elif 'smile' in instruction or 'serious' in instruction:
-                        weights.append(1.3)  # Medium weight for expression changes
-                    else:
-                        weights.append(1.0)  # Normal weight for pose changes
-                
-                # Calculate weighted average
-                weights = np.array(weights)
-                weights = weights / weights.sum()  # Normalize weights
-                
-                weighted_avg = np.zeros_like(vectors[0])
-                for i, vector in enumerate(vectors):
-                    weighted_avg += vector * weights[i]
-                
-                # Save employee to database
-                try:
-                    success = self.db.add_employee_with_face_vector(
-                        employee_id=employee_id,
-                        name=employee_name,
-                        face_vector=weighted_avg.tolist(),
-                        department=department,
-                        role=role
-                    )
-                    
-                    if success:
-                        print(f"[IMPROVED REG] Employee {employee_id} ({role}) registered successfully with {len(captured_vectors)} diverse face vectors")
-                        
-                        # Update success status
-                        vector_count = len(captured_vectors)
-                        def update_success_status():
-                            try:
-                                if hasattr(self, 'reg_status_label') and self.reg_status_label.winfo_exists():
-                                    self.reg_status_label.configure(
-                                        text=f"✅ Registration successful! ({vector_count} diverse vectors captured)",
-                                        fg='green'
-                                    )
-                                if hasattr(self, 'reg_camera_label') and self.reg_camera_label.winfo_exists():
-                                    self.reg_camera_label.configure(
-                                        text=f"✅ REGISTRATION COMPLETE!\n\n{employee_name}\nID: {employee_id}\nDiverse Vectors: {vector_count}",
-                                        bg='#28a745',
-                                        fg='white'
-                                    )
-                            except Exception as ui_error:
-                                print(f"[IMPROVED REG] UI update error: {ui_error}")
-                        
-                        self.root.after(0, update_success_status)
-                        
-                        # Close dialog after 3 seconds
-                        def close_dialog():
-                            try:
-                                if dialog.winfo_exists():
-                                    dialog.destroy()
-                            except:
-                                pass
-                        
-                        self.root.after(3000, close_dialog)
-                        
-                        # Show success message in main app
-                        def show_main_success():
-                            try:
-                                self.show_success_message(
-                                    f"👤 Employee {employee_name} registered with improved face recognition!"
-                                )
-                            except Exception as msg_error:
-                                print(f"[IMPROVED REG] Success message error: {msg_error}")
-                        
-                        self.root.after(100, show_main_success)
-                        
-                        # Reload face recognition data
-                        def reload_faces():
-                            try:
-                                self.load_known_faces()
-                            except Exception as reload_error:
-                                print(f"[IMPROVED REG] Face reload error: {reload_error}")
-                        
-                        self.root.after(500, reload_faces)
-                        
-                    else:
-                        print(f"[IMPROVED REG] Database error - failed to save employee {employee_id}")
-                        def update_db_error():
-                            try:
-                                if hasattr(self, 'reg_status_label') and self.reg_status_label.winfo_exists():
-                                    self.reg_status_label.configure(text="❌ Database error - failed to save employee", fg='red')
-                            except:
-                                pass
-                        
-                        self.root.after(0, update_db_error)
-                        
-                except Exception as db_error:
-                    print(f"[IMPROVED REG] Database operation error: {db_error}")
-                    def update_db_error():
-                        try:
-                            if hasattr(self, 'reg_status_label') and self.reg_status_label.winfo_exists():
-                                self.reg_status_label.configure(text=f"❌ Database error: {str(db_error)}", fg='red')
-                        except:
-                            pass
-                    
-                    self.root.after(0, update_db_error)
-                        
-            else:
-                # Not enough diverse faces captured
-                vector_count = len(captured_vectors)
-                print(f"[IMPROVED REG] Insufficient diverse vectors captured: {vector_count}/3 minimum")
-                
-                def update_insufficient_status():
-                    try:
-                        if hasattr(self, 'reg_status_label') and self.reg_status_label.winfo_exists():
-                            self.reg_status_label.configure(
-                                text=f"❌ Insufficient diverse face data ({vector_count}/3 minimum). Please try again.",
-                                fg='red'
-                            )
-                        if hasattr(self, 'reg_camera_label') and self.reg_camera_label.winfo_exists():
-                            self.reg_camera_label.configure(
-                                text=f"❌ CAPTURE FAILED\nOnly {vector_count} diverse poses\nMinimum required: 3",
-                                bg='#dc3545',
-                                fg='white'
-                            )
-                    except:
-                        pass
-                
-                self.root.after(0, update_insufficient_status)
-            
-            # Re-enable form on UI thread
-            def re_enable_form():
-                try:
-                    if hasattr(self, 'reg_employee_id') and self.reg_employee_id.winfo_exists():
-                        self.reg_employee_id.configure(state='normal')
-                    if hasattr(self, 'reg_employee_name') and self.reg_employee_name.winfo_exists():
-                        self.reg_employee_name.configure(state='normal')
-                    if hasattr(self, 'reg_department') and self.reg_department.winfo_exists():
-                        self.reg_department.configure(state='normal')
-                    if hasattr(self, 'capture_btn') and self.capture_btn.winfo_exists():
-                        self.capture_btn.configure(state='normal', text="📷 START FACE CAPTURE")
-                except Exception as form_error:
-                    print(f"[IMPROVED REG] Form re-enable error: {form_error}")
-            
-            # Resume main camera processing
-            def resume_main_camera():
-                try:
-                    self.main_camera_paused = False
-                    print("[IMPROVED REG] Main camera flag cleared after capture completion")
-                    
-                    # Restart main camera if not active
-                    if not self.camera_active:
-                        print("[IMPROVED REG] Restarting main camera after successful registration")
-                        self.start_camera()
-                    
-                    # Resume background face processing
-                    self.face_recognition.start_background_processing()
-                    print("[IMPROVED REG] Background face processing resumed")
-                except Exception as camera_error:
-                    print(f"[IMPROVED REG] Error resuming main camera: {camera_error}")
-            
-            self.root.after(0, re_enable_form)
-            self.root.after(0, resume_main_camera)
-                
-        except Exception as e:
-            print(f"[REG DEBUG] Error during face capture with preview: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            # Stop camera
-            self.reg_camera_active = False
-            self.reg_capture_active = False
-            
-            # Show error on UI thread with safe handling
-            def update_error_status():
-                try:
-                    if hasattr(self, 'reg_status_label') and self.reg_status_label.winfo_exists():
-                        self.reg_status_label.configure(text=f"❌ Capture failed: {str(e)}", fg='red')
-                    if hasattr(self, 'reg_camera_label') and self.reg_camera_label.winfo_exists():
-                        self.reg_camera_label.configure(text=f"❌ ERROR\n{str(e)}", bg='#dc3545', fg='white')
-                except Exception as ui_error:
-                    print(f"[REG DEBUG] UI error update failed: {ui_error}")
-            
-            self.root.after(0, update_error_status)
-            
-            # Re-enable form on UI thread with safe handling
-            def re_enable_form_error():
-                try:
-                    if hasattr(self, 'reg_employee_id') and self.reg_employee_id.winfo_exists():
-                        self.reg_employee_id.configure(state='normal')
-                    if hasattr(self, 'reg_employee_name') and self.reg_employee_name.winfo_exists():
-                        self.reg_employee_name.configure(state='normal')
-                    if hasattr(self, 'reg_department') and self.reg_department.winfo_exists():
-                        self.reg_department.configure(state='normal')
-                    if hasattr(self, 'capture_btn') and self.capture_btn.winfo_exists():
-                        self.capture_btn.configure(state='normal', text="📷 START FACE CAPTURE")
-                except Exception as form_error:
-                    print(f"[REG DEBUG] Form re-enable error: {form_error}")
-            
-            # Resume main camera processing even on error
-            def resume_main_camera_error():
-                try:
-                    self.main_camera_paused = False
-                    print("[REG DEBUG] Main camera flag cleared after capture error")
-                    
-                    # Restart main camera if not active
-                    if not self.camera_active:
-                        print("[REG DEBUG] Restarting main camera after registration error")
-                        self.start_camera()
-                    
-                    # Resume background face processing even on error
-                    self.face_recognition.start_background_processing()
-                    print("[REG DEBUG] Background face processing resumed after error")
-                except Exception as camera_error:
-                    print(f"[REG DEBUG] Error resuming main camera: {camera_error}")
-            
-            self.root.after(0, update_error_status)
-            self.root.after(0, re_enable_form_error)
-            self.root.after(0, resume_main_camera_error)
-    
-    def _capture_single_pose_improved(self, instruction: str):
-        """
-        Capture face vector for a single pose with quality checks
-        
-        Args:
-            instruction: Current instruction text
-            
-        Returns:
-            dict: Capture data with vector and metadata, or None if failed
-        """
-        max_attempts = 15  # Try for 3 seconds max (15 x 0.2s)
-        attempts = 0
-        
-        while attempts < max_attempts and self.reg_capture_active and self.reg_camera_active:
+    def start_settings_auto_refresh(self, interval_seconds=20):
+        """Start automatic refresh of shift settings from database every X seconds"""
+        def refresh_settings():
             try:
-                # Get frame from camera
-                if hasattr(self, 'camera_manager') and self.camera_manager and self.camera_manager.cap is not None:
-                    ret, frame = self.camera_manager.cap.read()
-                    
-                    if ret and frame is not None:
-                        # Extract face vector using hybrid approach
-                        face_vector, face_coords = self.face_recognition.extract_face_embedding_hybrid(frame)
-                        
-                        if face_vector is not None and face_coords is not None:
-                            # Quality check: ensure face meets quality standards
-                            if self._is_good_quality_capture_improved(frame, face_coords):
-                                capture_data = {
-                                    'vector': face_vector,
-                                    'instruction': instruction,
-                                    'timestamp': time.time(),
-                                    'coords': face_coords
-                                }
-                                print(f"[IMPROVED REG] ✅ Captured quality vector for: {instruction}")
-                                return capture_data
-            
-                attempts += 1
-                time.sleep(0.2)  # Wait before next attempt
-                
+                print(f"[AUTO-REFRESH] Reloading shift settings from database...")
+                self.load_shift_settings_from_db()
             except Exception as e:
-                print(f"[IMPROVED REG] Capture error for '{instruction}': {e}")
-                attempts += 1
-                time.sleep(0.2)
+                print(f"[AUTO-REFRESH] Error refreshing settings: {e}")
+            finally:
+                # Schedule next refresh
+                self.root.after(interval_seconds * 1000, refresh_settings)
         
-        print(f"[IMPROVED REG] ❌ Failed to capture for: {instruction}")
-        return None
+        # Start the first refresh cycle
+        self.root.after(interval_seconds * 1000, refresh_settings)
+        print(f"[AUTO-REFRESH] Settings auto-refresh enabled (every {interval_seconds} seconds)")
     
-    def _is_good_quality_capture_improved(self, frame, face_coords):
-        """
-        Check if the captured face meets quality standards
-        
-        Args:
-            frame: Camera frame
-            face_coords: Face bounding box coordinates (x, y, w, h)
-            
-        Returns:
-            bool: True if capture meets quality standards
-        """
-        if face_coords is None:
-            return False
-        
-        try:
-            x, y, w, h = face_coords
-            
-            # Check face size (should be reasonable portion of frame)
-            frame_area = frame.shape[0] * frame.shape[1]
-            face_area = w * h
-            face_ratio = face_area / frame_area
-            
-            # Face should be at least 3% of frame but not more than 40%
-            if face_ratio < 0.03 or face_ratio > 0.4:
-                print(f"[QUALITY CHECK] Face size ratio {face_ratio:.3f} out of range (0.03-0.4)")
-                return False
-            
-            # Check if face is reasonably centered (not too close to edges)
-            frame_h, frame_w = frame.shape[:2]
-            center_x, center_y = x + w//2, y + h//2
-            
-            # Face center should be in middle 70% of frame
-            margin_x, margin_y = frame_w * 0.15, frame_h * 0.15
-            if (center_x < margin_x or center_x > frame_w - margin_x or
-                center_y < margin_y or center_y > frame_h - margin_y):
-                print(f"[QUALITY CHECK] Face not well centered: ({center_x}, {center_y})")
-                return False
-            
-            # Check minimum face dimensions
-            if w < 50 or h < 50:
-                print(f"[QUALITY CHECK] Face too small: {w}x{h}")
-                return False
-            
-            print(f"[QUALITY CHECK] ✅ Good quality face: size={w}x{h}, ratio={face_ratio:.3f}, center=({center_x},{center_y})")
-            return True
-            
-        except Exception as e:
-            print(f"[QUALITY CHECK] Error checking quality: {e}")
-            return False
-
     def _check_face_distance_and_provide_feedback(self, frame, face_coords):
-        """
-        Check face distance and provide user feedback
-        
-        Args:
-            frame: Camera frame
-            face_coords: Face bounding box coordinates (x, y, w, h)
-            
-        Returns:
-            tuple: (is_good_distance, feedback_message)
-        """
         if face_coords is None:
             return False, "Please position your face in the camera view"
         
@@ -2063,14 +704,6 @@ class SimpleKioskApp:
             return False, "Error checking face distance"
 
     def _display_distance_feedback(self, display_frame, feedback_message, is_good_distance):
-        """
-        Display distance feedback on the camera frame
-        
-        Args:
-            display_frame: Frame to draw on
-            feedback_message: Message to display
-            is_good_distance: Whether distance is acceptable
-        """
         try:
             # Choose color based on distance quality
             if is_good_distance:
@@ -2107,271 +740,14 @@ class SimpleKioskApp:
         except Exception as e:
             print(f"[DISPLAY FEEDBACK] Error displaying feedback: {e}")
     
-    def set_attendance_mode(self, mode):
-        """Set the attendance mode and switch interfaces"""
-        self.attendance_mode = mode
-        
-        # Hide all interfaces first
-        self.clock_interface.pack_forget()
-        self.check_interface.pack_forget()
-        
-        # Reset all button colors first
-        self.clock_btn.configure(fg_color=("gray70", "gray30"))
-        self.check_btn.configure(fg_color=("gray70", "gray30"))
-        
-        # Update button colors and show appropriate interface
-        if mode == "CLOCK":
-            self.clock_btn.configure(fg_color=("green", "darkgreen"))
-            # Show CLOCK interface
-            self.clock_interface.pack(fill="both", expand=True, padx=10, pady=10)
-            # Update history for CLOCK mode
-            self.update_attendance_history()
-        else:  # CHECK
-            self.check_btn.configure(fg_color=("blue", "darkblue"))
-            # Show CHECK interface
-            self.check_interface.pack(fill="both", expand=True, padx=10, pady=10)
-            # Update history for CHECK mode
-            self.update_attendance_history()
-        
-        print(f"[MODE DEBUG] Switched to {mode} mode with dedicated interface")
+    def update_unified_attendance_display(self):
+        """Update the unified attendance display with all records"""
+        self.update_attendance_history()
     
     def show_manual_entry(self):
-        """Show manual entry dialog based on mode"""
-        if self.attendance_mode == "CHECK":
-            # For CHECK mode, show selection dialog first
-            self.show_check_mode_selection()
-        else:
-            # For CLOCK mode, use simple single-employee dialog
-            self.show_simple_manual_entry()
-    
-    def show_check_mode_selection(self):
-        """Show selection dialog for CHECK mode - Personal or Group"""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Check Mode Selection")
-        dialog.geometry("500x350")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.resizable(False, False)
-        
-        # Center dialog on screen
-        dialog.update_idletasks()
-        x = (dialog.winfo_screenwidth() // 2) - (500 // 2)
-        y = (dialog.winfo_screenheight() // 2) - (350 // 2)
-        dialog.geometry(f"500x350+{x}+{y}")
-        
-        # Configure dialog background
-        dialog.configure(bg='white')
-        
-        # Main frame
-        main_frame = tk.Frame(dialog, bg='white')
-        main_frame.pack(fill="both", expand=True, padx=30, pady=30)
-        
-        # Title
-        title_label = tk.Label(
-            main_frame,
-            text="✅ CHECK MODE SELECTION",
-            font=("Arial", 18, "bold"),
-            bg='white',
-            fg='black'
-        )
-        title_label.pack(pady=20)
-             
-        # Button frame
-        button_frame = tk.Frame(main_frame, bg='white')
-        button_frame.pack(pady=30)
-        
-        # Personal Check button
-        personal_btn = tk.Button(
-            button_frame,
-            text="PERSONAL\n CHECK\n IN/OUT\n (1)",
-            font=("Arial", 11, "bold"),
-            bg='lightblue',
-            fg='black',
-            width=15,
-            height=6,
-            relief='raised',
-            bd=2,
-            command=lambda: self.handle_personal_check(dialog)
-        )
-        personal_btn.pack(side="left", padx=15)
-        
-        # Group Check button
-        group_btn = tk.Button(
-            button_frame,
-            text="GROUP\n CHECK\n OUT\n (2)",
-            font=("Arial", 11, "bold"),
-            bg='lightgreen',
-            fg='black',
-            width=15,
-            height=6,
-            relief='raised',
-            bd=2,
-            command=lambda: self.handle_group_check(dialog)
-        )
-        group_btn.pack(side="right", padx=15)
-        
-        # Cancel button
-        cancel_btn = tk.Button(
-            main_frame,
-            text="Cancel",
-            font=("Arial", 10),
-            command=dialog.destroy,
-            bg='lightgray',
-            fg='black',
-            width=15,
-            relief='raised',
-            bd=1
-        )
-        cancel_btn.pack(pady=20)
-        
-        # Bind keyboard shortcuts
-        dialog.bind('<Key-1>', lambda e: self.handle_personal_check(dialog))
-        dialog.bind('<KP_1>', lambda e: self.handle_personal_check(dialog))
-        dialog.bind('<Key-2>', lambda e: self.handle_group_check(dialog))
-        dialog.bind('<KP_2>', lambda e: self.handle_group_check(dialog))
-        dialog.bind('<Return>', lambda e: self.handle_personal_check(dialog))  # Enter = Personal Check
-        dialog.bind('<KP_Enter>', lambda e: self.handle_personal_check(dialog))  # Numpad Enter
-        dialog.bind('<Escape>', lambda e: dialog.destroy())
-        
-        # Focus on dialog to capture keys
-        dialog.focus_set()
-    
-    def handle_personal_check(self, selection_dialog):
-        """Handle personal check selection"""
-        selection_dialog.destroy()
-        self.show_personal_check_dialog()
-    
-    def handle_group_check(self, selection_dialog):
-        """Handle group check selection"""
-        selection_dialog.destroy()
-        self.show_group_checkout_dialog()
-    
-    def show_personal_check_dialog(self):
-        """Show personal check dialog for single employee"""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Personal Check In/Out")
-        dialog.geometry("450x300")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.resizable(False, False)
-        
-        # Center dialog on screen
-        dialog.update_idletasks()
-        x = (dialog.winfo_screenwidth() // 2) - (450 // 2)
-        y = (dialog.winfo_screenheight() // 2) - (300 // 2)
-        dialog.geometry(f"450x300+{x}+{y}")
-        
-        # Configure dialog background
-        dialog.configure(bg='white')
-        
-        # Main frame
-        main_frame = tk.Frame(dialog, bg='white')
-        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        # Title
-        title_label = tk.Label(
-            main_frame,
-            text="👤 PERSONAL CHECK IN/OUT",
-            font=("Arial", 16, "bold"),
-            bg='white',
-            fg='black'
-        )
-        title_label.pack(pady=15)
-        
-        # Employee ID input
-        input_frame = tk.Frame(main_frame, bg='white')
-        input_frame.pack(pady=15)
-        
-        tk.Label(
-            input_frame,
-            text="Employee ID:",
-            font=("Arial", 12),
-            bg='white',
-            fg='black'
-        ).pack(side="left", padx=5)
-        
-        # Validation for employee ID
-        def validate_emp_id(char, current_text):
-            return char.isdigit() and len(current_text) < 10
-        
-        vcmd_emp = (dialog.register(validate_emp_id), '%S', '%P')
-        
-        self.personal_id_entry = tk.Entry(
-            input_frame,
-            font=("Arial", 14),
-            width=15,
-            validate='key',
-            validatecommand=vcmd_emp,
-            justify="center"
-        )
-        self.personal_id_entry.pack(side="left", padx=10)
-        
-        # Buttons
-        button_frame = tk.Frame(main_frame, bg='white')
-        button_frame.pack(pady=20)
-        
-        proceed_btn = tk.Button(
-            button_frame,
-            text="Process Check In/Out",
-            font=("Arial", 12, "bold"),
-            command=lambda: self.process_personal_check(dialog),
-            bg='lightblue',
-            fg='black',
-            width=20,
-            relief='raised',
-            bd=2
-        )
-        proceed_btn.pack(side="left", padx=10)
-        
-        cancel_btn = tk.Button(
-            button_frame,
-            text="Cancel",
-            font=("Arial", 12),
-            command=dialog.destroy,
-            bg='lightgray',
-            fg='black',
-            width=10,
-            relief='raised',
-            bd=1
-        )
-        cancel_btn.pack(side="right", padx=10)
-        
-        # Bind Enter key
-        self.personal_id_entry.bind('<Return>', lambda e: self.process_personal_check(dialog))
-        dialog.bind('<Escape>', lambda e: dialog.destroy())
-        
-        # Focus on entry
-        self.personal_id_entry.focus_set()
-        
-        # Store dialog reference for camera processing
-        self.personal_dialog = dialog
-        self.personal_scanning_active = True
-    
-    def process_personal_check(self, dialog):
-        """Process personal check for single employee"""
-        employee_id = self.personal_id_entry.get().strip()
-        
-        if not employee_id:
-            self.show_temp_message("Please enter Employee ID!", "red", parent_dialog=dialog)
-            return
-        
-        # Check if employee exists
-        employee = self.db.get_employee(employee_id)
-        if not employee:
-            self.show_temp_message("Employee not found!", "red", parent_dialog=dialog)
-            return
-        
-        # Close dialog and disable scanning
-        dialog.destroy()
-        self.personal_scanning_active = False
-        
-        # Process attendance directly (handles location selection if needed)
-        success, message = self.process_attendance_with_location_check(employee_id, "manual")
-        if success and message != "Location selection initiated":
-            self.show_success_message(f"✓ {employee['name']} - {message}")
-        elif not success:
-            self.show_error_message(f"✗ {message}")
-        # If message is "Location selection initiated", the location dialog will handle the UI
+        """Show unified manual entry dialog"""
+        # Use the simple single-employee dialog for unified system
+        self.show_simple_manual_entry()
     
     def show_simple_manual_entry(self):
         """Show simple manual entry dialog for CLOCK mode"""
@@ -2390,13 +766,9 @@ class SimpleKioskApp:
         # Entry widgets
         tk.Label(dialog, text="Enter Employee ID:", font=("Arial", 16)).pack(pady=20)
         
-        # Create validation function for numbers only with length limit
         def validate_input(char, current_text):
-            """Validate that input contains only numbers and is within length limit"""
-            # Allow only digits and limit length to 10 characters
-            return char.isdigit() and len(current_text) < 10
+            return char.isdigit() and len(current_text) <= 12
         
-        # Register the validation function
         vcmd = (dialog.register(validate_input), '%S', '%P')
         
         entry = tk.Entry(dialog, font=("Arial", 14), width=20, justify="center",
@@ -2405,15 +777,15 @@ class SimpleKioskApp:
         entry.focus_set()
         
         def submit():
-            employee_id = entry.get().strip()
+            nric = entry.get().strip()
             dialog.destroy()
-            if employee_id and employee_id.isdigit():
-                self.process_manual_entry(employee_id)
-            elif employee_id:
-                self.show_error_message("✗ Employee ID must contain only numbers")
+            if nric and nric.isdigit():
+                self.process_manual_entry(nric)
+            elif nric:
+                self.show_error_message("✗ NRIC must contain only numbers")
             else:
-                self.show_error_message("✗ Please enter an Employee ID")
-        
+                self.show_error_message("✗ Please enter an NRIC")
+
         def cancel():
             dialog.destroy()
         
@@ -2429,12 +801,11 @@ class SimpleKioskApp:
         # Bind Enter key
         entry.bind('<Return>', lambda e: submit())
         dialog.bind('<Escape>', lambda e: cancel())
-    
-    def process_manual_entry(self, employee_id):
-        """Process manual employee ID entry"""
-        employee = self.db.get_employee(employee_id)
+
+    def process_manual_entry(self, nric):
+        employee = self.db.get_employee(nric)
         if employee:
-            success, message = self.process_attendance_with_location_check(employee_id, "manual")
+            success, message = self.process_attendance_with_location_check(nric, "manual")
             if success and message != "Location selection initiated":
                 self.show_success_message(f"✓ {employee['name']} - {message}")
             elif not success:
@@ -2445,94 +816,341 @@ class SimpleKioskApp:
                     self.show_error_message(f"✗ {message}")
             # If message is "Location selection initiated", the location dialog will handle the UI
         else:
-            self.show_employee_not_found_dialog(employee_id)
-    
-    def process_attendance_with_location_check(self, employee_id, method):
-        """Process attendance with proper location handling for CHECK OUT"""
-        employee = self.db.get_employee(employee_id)
+            self.show_employee_not_found_dialog(nric)
+
+    def process_attendance_with_location_check(self, nric, method):
+        """Process unified attendance with smart logic for clock/check operations"""
+        employee = self.db.get_employee(nric)
         if not employee:
-            return False, f"Employee {employee_id} not found"
-        
-        # For CHECK mode, check if this will be a checkout (need location first)
-        if self.attendance_mode == "CHECK":
-            # Check what the next action would be
-            today_records = self.attendance_manager.get_employee_attendance_today(employee_id)
+            return False, f"Employee {nric} not found"
+
+        # Check if group mode is enabled
+        if hasattr(self, 'group_check_var') and self.group_check_var.get():
+            # Group mode is ON - add to group list instead of processing immediately
+            employee_name = employee['name']
             
-            # Filter for check records and sort by timestamp to find the most recent
+            # Get today's attendance records
+            today_records = self.attendance_manager.get_employee_attendance_today(nric)
+            clock_records = [r for r in today_records if r.get('attendance_type') == 'clock']
+            clock_records.sort(key=lambda x: x['timestamp'], reverse=True)
+            last_clock_record = clock_records[0] if clock_records else None
+            
+            # Check if employee has clocked in today
+            if not last_clock_record:
+                self.show_group_error_notification(employee_name, nric, 'not_clocked_in')
+                return False, f"{employee_name} has not clocked in yet today"
+            
+            # Check if employee has already clocked out (final clock out)
+            if last_clock_record['status'] == 'out':
+                self.show_group_error_notification(employee_name, nric, 'final_clock_out')
+                return False, f"{employee_name} has already clocked out for the day"
+            
+            # Check if employee is already checked out (can't add to group if already checked out)
             check_records = [r for r in today_records if r.get('attendance_type') == 'check']
-            check_records.sort(key=lambda x: x['timestamp'], reverse=True)  # Most recent first
-            
+            check_records.sort(key=lambda x: x['timestamp'], reverse=True)
             last_check_record = check_records[0] if check_records else None
             
-            # Determine if this will be a checkout
-            will_be_checkout = False
-            if not last_check_record:
-                # No check records today - default is checkout
-                will_be_checkout = True
-            else:
-                # Will checkout if last status was 'in'
-                will_be_checkout = (last_check_record['status'] == 'in')
+            if last_check_record and last_check_record['status'] == 'out':
+                self.show_group_error_notification(employee_name, nric, 'already_checked_out')
+                return False, f"{employee_name} is already checked out"
             
-            if will_be_checkout:
-                # Show location selection first, then process attendance
-                self.handle_checkout_with_location_first(employee_id, method)
-                return True, "Location selection initiated"
+            # Validate that employee is within the allowed time window for check operations
+            current_time = self.attendance_manager.get_current_time()
+            current_time_only = current_time.time()
+            
+            # Get employee role and clock-in time to determine shift
+            employee_role = employee.get('role', 'Staff')
+            clock_in_time = datetime.fromisoformat(last_clock_record['timestamp']).time()
+            
+            # Determine if current time is within check operation window
+            is_within_check_window = False
+            
+            if employee_role == 'Security':
+                # Security: Same logic as clock-out time determination
+                if clock_in_time >= dt_time(18, 0):  # Night shift
+                    if current_time_only < dt_time(7, 0):  # Next day morning
+                        is_within_check_window = False  # Can clock out now
+                    elif current_time_only >= dt_time(18, 0):  # Same day, still in night shift
+                        is_within_check_window = True  # Can check in/out
+                    else:  # Same day, after 7 AM but before 6 PM
+                        is_within_check_window = False  # Should have clocked out
+                else:  # Day shift
+                    is_within_check_window = current_time_only < dt_time(19, 0)  # Before 7:00 PM
+            else:
+                # Staff: Must be within the check window (after clock in, before minimum clock out time)
+                # Check window ends when they're allowed to do final clock out
+                if clock_in_time < dt_time(8, 0):  # Early shift
+                    early_hour, early_minute = map(int, self.early_shift_min_clockout.split(':'))
+                    final_clockout_time = dt_time(early_hour, early_minute)
+                    is_within_check_window = current_time_only < final_clockout_time
+                else:  # Regular shift
+                    regular_hour, regular_minute = map(int, self.regular_shift_min_clockout.split(':'))
+                    final_clockout_time = dt_time(regular_hour, regular_minute)
+                    is_within_check_window = current_time_only < final_clockout_time
+            
+            if not is_within_check_window:
+                if employee_role == 'Security':
+                    if clock_in_time >= dt_time(18, 0):  # Night shift
+                        min_clockout = "7:00 AM"
+                        shift_type = "Night Shift"
+                    else:  # Day shift
+                        min_clockout = "7:00 PM"
+                        shift_type = "Day Shift"
+                else:
+                    shift_type = "Early" if clock_in_time < dt_time(8, 0) else "Regular"
+                    min_clockout = self.early_shift_min_clockout if shift_type == "Early" else self.regular_shift_min_clockout
+                
+                additional_info = f"Current time: {current_time_only.strftime('%I:%M %p')}\nMinimum clock-out: {min_clockout}"
+                self.show_group_error_notification(employee_name, nric, 'not_in_check_window', additional_info)
+                return False, f"{employee_name} can only do final clock out now (after {min_clockout}), not check out"
+            
+            # Add to group list
+            if self.add_employee_to_group(nric, employee_name):
+                return True, f"{employee_name} added to group list"
+            else:
+                self.show_group_error_notification(employee_name, nric, 'already_in_group')
+                return False, f"{employee_name} is already in group list"
         
-        # Normal processing for CLOCK mode or CHECK IN
+        # Normal mode - continue with regular processing
+        
+        # Get today's attendance records to determine what action to take
+        today_records = self.attendance_manager.get_employee_attendance_today(nric)
+        clock_records = [r for r in today_records if r.get('attendance_type') == 'clock']
+        clock_records.sort(key=lambda x: x['timestamp'], reverse=True)
+        last_clock_record = clock_records[0] if clock_records else None
+        check_records = [r for r in today_records if r.get('attendance_type') == 'check']
+        check_records.sort(key=lambda x: x['timestamp'], reverse=True)
+        last_check_record = check_records[0] if check_records else None
+
+        attendance_type = None
+        status = None
+        current_time = self.attendance_manager.get_current_time()
+        current_time_only = current_time.time()
+        employee_role = employee.get('role', 'Staff') if employee else 'Staff'
+
+        # --- Security Special Logic - Check for Previous Day Night Shift ---
+        if employee_role == 'Security':
+            # Always check for previous day night shift first (regardless of today's records)
+            prev_date = (current_time - timedelta(days=1)).date()
+            prev_records = self.db.get_attendance_by_date(nric, prev_date)
+            prev_clock_ins = [r for r in prev_records if r.get('attendance_type') == 'clock' and r['status'] == 'in']
+            prev_clock_outs = [r for r in prev_records if r.get('attendance_type') == 'clock' and r['status'] == 'out']
+            
+            # Check if there was a night shift clock-in yesterday without clock-out
+            night_shift_in = None
+            for r in prev_clock_ins:
+                t = datetime.fromisoformat(r['timestamp']).time()
+                if t >= dt_time(18, 0):  # Night shift clock-in (6:00 PM or later)
+                    night_shift_in = r
+                    break
+            
+            # If there's an unfinished night shift from previous day, force clock-out
+            if night_shift_in and not prev_clock_outs:
+                if current_time_only >= dt_time(7, 0):
+                    # Force clock-out for previous night shift - handle directly
+                    employee = self.db.get_employee(nric)
+                    current_time = self.attendance_manager.get_current_time()
+                    
+                    # Calculate overtime for night shift
+                    min_clock_out_time = dt_time(7, 0)
+                    total_seconds = (current_time_only.hour * 3600 + current_time_only.minute * 60) - (7 * 3600)
+                    if total_seconds > 0:
+                        overtime_hours = max(0, int(total_seconds / 3600))
+                    else:
+                        overtime_hours = 0
+                    
+                    # Record clock-out for previous day night shift
+                    record_id = self.db.record_attendance(nric, method, "out", "clock", current_time, overtime_hours=overtime_hours)
+                    
+                    if record_id:
+                        base_message = f"{employee['name']} (Security) clocked out from Night Shift (7:00 PM - 7:00 AM)"
+                        if overtime_hours > 0:
+                            base_message += f" - OT {overtime_hours} hour{'s' if overtime_hours > 1 else ''}"
+                        return True, base_message
+                    else:
+                        return False, "Failed to record night shift clock-out"
+                else:
+                    return False, f"Night shift clock-out not allowed before 7:00 AM"
+            
+            # No previous night shift to complete - proceed with normal logic
+            if not last_clock_record:
+                # No clock record today - this is a new clock-in
+                if dt_time(6, 0) <= current_time_only < dt_time(12, 0):
+                    late = current_time_only > dt_time(7, 0)
+                    shift_name = "Day Shift"
+                elif dt_time(18, 0) <= current_time_only <= dt_time(23, 59) or dt_time(0, 0) <= current_time_only < dt_time(1, 0):
+                    late = current_time_only > dt_time(19, 0)
+                    shift_name = "Night Shift"
+                else:
+                    late = False
+                    shift_name = "Security Shift"
+                
+                success, message = self.attendance_manager.process_attendance(
+                    nric, method, "clock", None, is_late=late, shift_name=shift_name
+                )
+                return success, message
+
+        # --- Universal Logic for Staff and Security ---
+        # Alternating action logic for staff
+        if not last_clock_record:
+            attendance_type = "clock"
+            status = "in"
+        elif last_clock_record['status'] == 'in':
+            # Already clocked in - determine if this should be check in/out or final clock out
+            # Check current time to see if it's appropriate for clock out
+            clock_in_time = datetime.fromisoformat(last_clock_record['timestamp']).time()
+            is_clock_out_time = False
+            
+            if employee_role == 'Security':
+                # Security: Check against expected shift end times
+                if clock_in_time >= dt_time(18, 0):  # Night shift (6:00 PM - 7:00 AM next day)
+                    # Night shift can clock out at 7:00 AM next day
+                    # If it's same day and before midnight, not time to clock out yet
+                    if current_time_only < dt_time(7, 0):  # Next day morning
+                        is_clock_out_time = True
+                    elif current_time_only >= dt_time(18, 0):  # Same day, still in night shift
+                        is_clock_out_time = False
+                    else:  # Same day, after 7 AM but before 6 PM - should have clocked out already
+                        is_clock_out_time = True
+                else:  # Day shift (6:00 AM - 7:00 PM same day)
+                    # Day shift can clock out at 7:00 PM
+                    is_clock_out_time = current_time_only >= dt_time(19, 0)  # 7:00 PM
+            else:
+                # Staff: Original logic
+                if clock_in_time < dt_time(8, 0):
+                    early_hour, early_minute = map(int, self.early_shift_min_clockout.split(':'))
+                    min_clock_out = dt_time(early_hour, early_minute)
+                    is_clock_out_time = current_time_only >= min_clock_out
+                else:
+                    regular_hour, regular_minute = map(int, self.regular_shift_min_clockout.split(':'))
+                    min_clock_out = dt_time(regular_hour, regular_minute)
+                    is_clock_out_time = current_time_only >= min_clock_out
+            if is_clock_out_time:
+                attendance_type = "clock"
+                status = "out"
+            else:
+                if not last_check_record:
+                    attendance_type = "check"
+                    status = "out"
+                else:
+                    attendance_type = "check"
+                    status = "in" if last_check_record['status'] == 'out' else "out"
+        else:
+            attendance_type = "clock"
+            status = "in"
+
+        # Handle location selection for check out operations
+        if attendance_type == "check" and status == "out":
+            self.handle_checkout_with_location_first_unified(nric, method)
+            return True, "Location selection initiated"
+
+        # Process normal attendance (clock in/out, check in)
         success, message = self.attendance_manager.process_attendance(
-            employee_id, method, self.attendance_mode, None
+            nric, method, attendance_type, None
         )
         return success, message
     
-    def handle_checkout_with_location_first(self, employee_id, method):
-        """Handle checkout by showing location selection first, then recording attendance"""
+    def handle_checkout_with_location_first_unified(self, nric, method):
+        """Handle checkout by showing location selection first, then recording attendance for unified system"""
         def on_location_selected(location):
             if location:
-                # Location selected - proceed with checkout and record location
+                # Check if this is an emergency clock-out
+                is_emergency = location.get('emergency_clockout', False)
+                emergency_reason = location.get('emergency_reason', '')
+                
+                if is_emergency:
+                    # EMERGENCY CLOCK-OUT: Bypass time restrictions and force clock out
+                    print(f"[EMERGENCY DEBUG] Processing emergency clock-out for {nric}")
+                    print(f"[EMERGENCY DEBUG] Location: {location.get('name')}, Reason: {emergency_reason}")
+                    
+                    # Process emergency clock-out with override flag
+                    success, message = self.attendance_manager.process_attendance(
+                        nric, method, "clock", None, emergency_override=True
+                    )
+                    
+                    if success:
+                        # Get the attendance record ID from the message or query latest record
+                        employee = self.db.get_employee(nric)
+                        today_records = self.attendance_manager.get_employee_attendance_today(nric)
+                        
+                        # Get the most recent clock record
+                        clock_records = [r for r in today_records if r.get('attendance_type') == 'clock']
+                        if clock_records:
+                            clock_records.sort(key=lambda x: x['timestamp'], reverse=True)
+                            latest_record = clock_records[0]
+                            record_id = latest_record.get('_id')
+                            
+                            # Update record with emergency information
+                            location_data = {
+                                "location_name": location.get('name', ''),
+                                "address": location.get('address', ''),
+                                "emergency_clockout": True,
+                                "emergency_reason": emergency_reason
+                            }
+                            
+                            self.db.update_attendance_location(record_id, location_data)
+                            
+                            location_name = location.get('name', 'Emergency location')
+                            self.show_success_message(
+                                f"🚨 {employee['name']} - EMERGENCY CLOCK-OUT\n📍 Going to: {location_name}\n⚠️ Reason: {emergency_reason[:50]}..."
+                            )
+                        else:
+                            self.show_success_message(f"🚨 {employee['name']} - EMERGENCY CLOCK-OUT\n{message}")
+                    else:
+                        self.show_error_message(f"✗ Emergency clock-out failed: {message}")
+                    
+                    self.update_attendance_history()
+                    return
+                
+                # Normal check-out with location
                 current_time = self.attendance_manager.get_current_time()
-                record_id = self.db.record_attendance(employee_id, method, "out", "check", current_time)
+                record_id = self.db.record_attendance(nric, method, "out", "check", current_time)
                 
                 if record_id:
                     # Prepare location data for attendance record
                     location_data = {
                         "location_name": location.get('name', ''),
-                        "address": location.get('address', '')
+                        "address": location.get('address', ''),
+                        "type": location.get('type', 'work')  # Include checkout type
                     }
                     
                     # Update the attendance record with location information
                     success = self.db.update_attendance_location(record_id, location_data)
                     
                     if success:
-                        # Also save to location manager for favorites/history (optional)
-                        self.location_manager.save_checkout_location(
-                            record_id, employee_id, location
-                        )
-                        
-                        employee = self.db.get_employee(employee_id)
+                        employee = self.db.get_employee(nric)
                         location_name = location.get('name', 'Selected location')
                         self.show_success_message(
                             f"✓ {employee['name']} checked out\n📍 Going to: {location_name}"
                         )
-                        # Update attendance history
-                        self.update_attendance_history()
                     else:
                         self.show_error_message("✗ Failed to save location")
+                    
+                    # Update the attendance display
+                    self.update_attendance_history()
                 else:
-                    self.show_error_message("✗ Failed to record checkout")
+                    self.show_error_message("✗ Failed to record attendance")
             else:
-                # User cancelled location selection - do not record checkout
-                employee = self.db.get_employee(employee_id)
-                self.show_error_message(f"✗ {employee['name']} checkout cancelled - location required")
+                # User cancelled location selection - still record checkout without location
+                current_time = self.attendance_manager.get_current_time()
+                record_id = self.db.record_attendance(nric, method, "out", "check", current_time)
+                
+                if record_id:
+                    employee = self.db.get_employee(nric)
+                    self.show_success_message(f"✓ {employee['name']} checked out")
+                    self.update_attendance_history()
+                else:
+                    self.show_error_message("✗ Failed to record attendance")
         
         # Open location selector dialog
         from core.location_selector import LocationSelector
         LocationSelector(
             parent=self.root,
-            employee_id=employee_id,
+            nric=nric,
             callback=on_location_selected
         )
     
-    def handle_checkout_location_selection(self, attendance_id, employee_id):
+    def handle_checkout_location_selection(self, attendance_id, nric):
         """Handle location selection for check-out (legacy method for existing attendance records)"""
         def on_location_selected(location):
             if location:
@@ -2548,10 +1166,10 @@ class SimpleKioskApp:
                 if success:
                     # Also save to location manager for favorites/history (optional)
                     self.location_manager.save_checkout_location(
-                        attendance_id, employee_id, location
+                        attendance_id, nric, location
                     )
                     
-                    employee = self.db.get_employee(employee_id)
+                    employee = self.db.get_employee(nric)
                     location_name = location.get('name', 'Selected location')
                     self.show_success_message(
                         f"✓ {employee['name']} checked out\n📍 Going to: {location_name}"
@@ -2560,18 +1178,18 @@ class SimpleKioskApp:
                     self.show_error_message("✗ Failed to save location")
             else:
                 # User cancelled location selection - that's okay, checkout is still recorded
-                employee = self.db.get_employee(employee_id)
+                employee = self.db.get_employee(nric)
                 self.show_success_message(f"✓ {employee['name']} checked out")
         
         # Open location selector dialog
         from core.location_selector import LocationSelector
         LocationSelector(
             parent=self.root,
-            employee_id=employee_id,
+            nric=nric,
             callback=on_location_selected
         )
     
-    def show_employee_not_found_dialog(self, employee_id):
+    def show_employee_not_found_dialog(self, nric):
         """Show a dedicated error dialog for employee not found"""
         dialog = tk.Toplevel(self.root)
         dialog.title("Employee Not Found")
@@ -2601,7 +1219,7 @@ class SimpleKioskApp:
         tk.Label(main_frame, text="EMPLOYEE NOT FOUND", 
                 font=("Arial", 14, "bold"), bg='#ff4444', fg='white').pack()
         
-        tk.Label(main_frame, text=f"Employee ID: {employee_id}", 
+        tk.Label(main_frame, text=f"Employee ID: {nric}", 
                 font=("Arial", 12), bg='#ff4444', fg='white').pack(pady=5)
         
         tk.Label(main_frame, text="Please check the ID and try again", 
@@ -2621,7 +1239,7 @@ class SimpleKioskApp:
         # Auto-close after 5 seconds
         dialog.after(5000, dialog.destroy)
     
-    def show_already_checked_out_dialog(self, employee_name, employee_id):
+    def show_already_checked_out_dialog(self, employee_name, nric):
         """Show error dialog for employee already checked out"""
         dialog = tk.Toplevel(self.root)
         dialog.title("Already Checked Out")
@@ -2651,7 +1269,7 @@ class SimpleKioskApp:
         tk.Label(main_frame, text="ALREADY CHECKED OUT", 
                 font=("Arial", 14, "bold"), bg='#ff8800', fg='white').pack()
         
-        tk.Label(main_frame, text=f"{employee_name} (ID: {employee_id})", 
+        tk.Label(main_frame, text=f"{employee_name} (ID: {nric})", 
                 font=("Arial", 12), bg='#ff8800', fg='white').pack(pady=5)
         
         tk.Label(main_frame, text="Employee is already in checked out status", 
@@ -2671,233 +1289,110 @@ class SimpleKioskApp:
         # Auto-close after 5 seconds
         dialog.after(5000, dialog.destroy)
     
-    def show_group_checkout_dialog(self):
-        """Show the group checkout dialog for collecting employee IDs"""
+    def show_group_error_notification(self, employee_name, nric, error_type, additional_info=""):
+        """Show detailed error notification for group check scenarios"""
+        # Define error configurations
+        error_configs = {
+            'not_clocked_in': {
+                'title': 'Cannot Add to Group',
+                'header': 'NOT CLOCKED IN',
+                'icon': '❌',
+                'bg_color': '#ff4444',
+                'description': 'Employee has not clocked in today'
+            },
+            'already_checked_out': {
+                'title': 'Cannot Add to Group', 
+                'header': 'ALREADY CHECKED OUT',
+                'icon': '⚠️',
+                'bg_color': '#ff8800',
+                'description': 'Employee is already in checked out status'
+            },
+            'not_in_check_window': {
+                'title': 'Cannot Add to Group',
+                'header': 'OUTSIDE CHECK WINDOW',
+                'icon': '🕐',
+                'bg_color': '#ff6600',
+                'description': 'Current time is outside the allowed check window'
+            },
+            'already_in_group': {
+                'title': 'Cannot Add to Group',
+                'header': 'ALREADY IN GROUP',
+                'icon': '✅',
+                'bg_color': '#3399ff',
+                'description': 'Employee is already added to the group list'
+            },
+            'final_clock_out': {
+                'title': 'Cannot Add to Group',
+                'header': 'ALREADY CLOCKED OUT',
+                'icon': '🔒',
+                'bg_color': '#666666',
+                'description': 'Employee has completed final clock out for today'
+            }
+        }
+        
+        config = error_configs.get(error_type, error_configs['not_clocked_in'])
+        
         dialog = tk.Toplevel(self.root)
-        dialog.title("CHECK Mode - Manual Entry")
-        dialog.geometry("600x700")
+        dialog.title(config['title'])
+        dialog.geometry("400x250")
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.resizable(False, False)
         
         # Center dialog on screen
         dialog.update_idletasks()
-        x = (dialog.winfo_screenwidth() // 2) - (600 // 2)
-        y = (dialog.winfo_screenheight() // 2) - (700 // 2)
-        dialog.geometry(f"600x700+{x}+{y}")
+        x = (dialog.winfo_screenwidth() // 2) - (400 // 2)
+        y = (dialog.winfo_screenheight() // 2) - (250 // 2)
+        dialog.geometry(f"400x250+{x}+{y}")
         
         # Configure dialog background
-        dialog.configure(bg='white')
+        dialog.configure(bg=config['bg_color'])
         
         # Main frame
-        main_frame = tk.Frame(dialog, bg='white')
+        main_frame = tk.Frame(dialog, bg=config['bg_color'])
         main_frame.pack(fill="both", expand=True, padx=20, pady=20)
         
-        # Title
-        title_label = tk.Label(
-            main_frame,
-            text="GROUP CHECK OUT",
-            font=("Arial", 20, "bold"),
-            bg='white',
-            fg='black'
-        )
-        title_label.pack(pady=10)
+        # Icon
+        tk.Label(main_frame, text=config['icon'], font=("Arial", 36), 
+                bg=config['bg_color'], fg='white').pack(pady=10)
         
-        # Employee IDs collection
-        ids_frame = tk.Frame(main_frame, bg='white')
-        ids_frame.pack(fill="both", expand=True, pady=10)
+        # Header message
+        tk.Label(main_frame, text=config['header'], 
+                font=("Arial", 14, "bold"), bg=config['bg_color'], fg='white').pack()
         
-        # Employee IDs list frame
-        self.group_ids_frame = tk.Frame(ids_frame, bg='white', relief='sunken', bd=2)
-        self.group_ids_frame.pack(fill="both", expand=True, pady=10, padx=20)
+        # Employee info
+        tk.Label(main_frame, text=f"{employee_name}", 
+                font=("Arial", 13, "bold"), bg=config['bg_color'], fg='white').pack(pady=5)
         
-        # Scrollable area for employee list
-        canvas = tk.Canvas(self.group_ids_frame, bg='white', height=200)
-        scrollbar = tk.Scrollbar(self.group_ids_frame, orient="vertical", command=canvas.yview)
-        self.scrollable_frame = tk.Frame(canvas, bg='white')
+        tk.Label(main_frame, text=f"ID: {nric}", 
+                font=("Arial", 12), bg=config['bg_color'], fg='white').pack()
         
-        self.scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
+        # Description
+        tk.Label(main_frame, text=config['description'], 
+                font=("Arial", 11), bg=config['bg_color'], fg='white').pack(pady=10)
         
-        canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
+        # Additional info if provided
+        if additional_info:
+            tk.Label(main_frame, text=additional_info, 
+                    font=("Arial", 10), bg=config['bg_color'], fg='white').pack(pady=5)
         
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        # OK button
+        ok_button = tk.Button(main_frame, text="OK", font=("Arial", 12, "bold"),
+                             command=dialog.destroy, width=10,
+                             bg='white', fg=config['bg_color'], relief='raised', bd=2)
+        ok_button.pack(pady=15)
+        ok_button.focus_set()
         
-        # Current employee input
-        input_frame = tk.Frame(ids_frame, bg='white')
-        input_frame.pack(fill="x", pady=5)
-        
-        tk.Label(
-            input_frame,
-            text="Employee ID:",
-            font=("Arial", 10),
-            bg='white',
-            fg='gray'
-        ).pack(side="left", padx=5)
-        
-        # Validation for employee ID
-        def validate_emp_id(char, current_text):
-            return char.isdigit() and len(current_text) < 10
-        
-        vcmd_emp = (dialog.register(validate_emp_id), '%S', '%P')
-        
-        self.group_current_id = tk.Entry(
-            input_frame,
-            font=("Arial", 12),
-            width=15,
-            validate='key',
-            validatecommand=vcmd_emp
-        )
-        self.group_current_id.pack(side="left", padx=5)
-        
-        add_btn = tk.Button(
-            input_frame,
-            text="Add",
-            font=("Arial", 10),
-            command=lambda: self.add_employee_to_group(),
-            bg='#f0f0f0',
-            fg='black',
-            relief='raised',
-            bd=2
-        )
-        add_btn.pack(side="left", padx=5)
-        
-        # Initialize group data
-        self.group_employees = []
-        self.group_employee_labels = []
-        
-        # Buttons
-        button_frame = tk.Frame(main_frame, bg='white')
-        button_frame.pack(fill="x", pady=20)
-        
-        proceed_btn = tk.Button(
-            button_frame,
-            text="Proceed to Location Selection",
-            font=("Arial", 12, "bold"),
-            command=lambda: self.proceed_group_location_selection(dialog),
-            bg='#f0f0f0',
-            fg='black',
-            relief='raised',
-            bd=2,
-            width=25
-        )
-        proceed_btn.pack(side="left", padx=10)
-        
-        cancel_btn = tk.Button(
-            button_frame,
-            text="Cancel",
-            font=("Arial", 12),
-            command=dialog.destroy,
-            bg='#f0f0f0',
-            fg='black',
-            relief='raised',
-            bd=2,
-            width=10
-        )
-        cancel_btn.pack(side="right", padx=10)
-        
-        # Bind Enter key for adding employees
-        self.group_current_id.bind('<Return>', lambda e: self.add_employee_to_group())
+        # Bind Enter and Escape keys
+        dialog.bind('<Return>', lambda e: dialog.destroy())
         dialog.bind('<Escape>', lambda e: dialog.destroy())
         
-        # Focus on employee ID entry initially
-        self.group_current_id.focus_set()
-        
-        # Store dialog reference for camera processing
-        self.group_dialog = dialog
-        
-        # Enable camera scanning for this dialog
-        self.group_scanning_active = True
+        # Auto-close after 5 seconds
+        dialog.after(5000, dialog.destroy)
     
-    def add_employee_to_group(self):
-        """Add an employee to the group checkout list"""
-        employee_id = self.group_current_id.get().strip()
-        
-        if not employee_id:
-            return
-        
-        # Check if employee exists
-        employee = self.db.get_employee(employee_id)
-        if not employee:
-            # Use same error dialog as CLOCK mode
-            self.show_employee_not_found_dialog(employee_id)
-            return
-        
-        # Check if employee is already checked out
-        today_records = self.attendance_manager.get_employee_attendance_today(employee_id)
-        check_records = [r for r in today_records if r.get('attendance_type') == 'check']
-        check_records.sort(key=lambda x: x['timestamp'], reverse=True)  # Most recent first
-        
-        last_check_record = check_records[0] if check_records else None
-        
-        # If last check record is 'out', employee is already checked out
-        if last_check_record and last_check_record['status'] == 'out':
-            self.show_already_checked_out_dialog(employee['name'], employee_id)
-            return
-        
-        # Check if already added to current group
-        if employee_id in [emp['employee_id'] for emp in self.group_employees]:
-            self.show_temp_message("Employee already added to group!", "orange")
-            return
-        
-        # Add employee
-        self.group_employees.append({
-            'employee_id': employee_id,
-            'name': employee['name']
-        })
-        
-        # Update display
-        self.update_group_employee_display()
-        
-        # Clear input
-        self.group_current_id.delete(0, tk.END)
-        
-        print(f"[GROUP DEBUG] Added employee: {employee['name']} ({employee_id})")
+
     
-    def update_group_employee_display(self):
-        """Update the display of employees in the group"""
-        # Clear existing labels
-        for label in self.group_employee_labels:
-            label.destroy()
-        self.group_employee_labels.clear()
-        
-        # Add new labels
-        for i, emp in enumerate(self.group_employees):
-            emp_frame = tk.Frame(self.scrollable_frame, bg='white')
-            emp_frame.pack(fill="x", padx=5, pady=2)
-            
-            emp_label = tk.Label(
-                emp_frame,
-                text=f"{i+1}. {emp['name']} (ID: {emp['employee_id']})",
-                font=("Arial", 10),
-                bg='white',
-                anchor='w'
-            )
-            emp_label.pack(side="left", fill="x", expand=True)
-            
-            remove_btn = tk.Button(
-                emp_frame,
-                text="✕",
-                font=("Arial", 8),
-                command=lambda idx=i: self.remove_employee_from_group(idx),
-                bg='red',
-                fg='white',
-                width=3
-            )
-            remove_btn.pack(side="right")
-            
-            self.group_employee_labels.extend([emp_frame, emp_label, remove_btn])
-    
-    def remove_employee_from_group(self, index):
-        """Remove an employee from the group"""
-        if 0 <= index < len(self.group_employees):
-            removed_emp = self.group_employees.pop(index)
-            self.update_group_employee_display()
-            print(f"[GROUP DEBUG] Removed employee: {removed_emp['name']} ({removed_emp['employee_id']})")
+
     
     def show_temp_message(self, message, color, parent_dialog=None):
 
@@ -2954,95 +1449,7 @@ class SimpleKioskApp:
         # Auto-close after 3 seconds
         dialog.after(3000, dialog.destroy)
     
-    def proceed_group_location_selection(self, dialog):
-        """Proceed to location selection for the group"""
-        if not self.group_employees:
-            self.show_temp_message("Add at least one employee!", "red")
-            return
-        
-        # Close the group dialog
-        dialog.destroy()
-        self.group_scanning_active = False
-        
-        # Show location selector for the group
-        self.show_group_location_selector()
-    
-    def show_group_location_selector(self):
-        """Show location selector for group checkout"""
-        def on_location_selected(location):
-            if location:
-                self.process_group_checkout(location)
-            else:
-                self.show_error_message("✗ Group checkout cancelled - location required")
-        
-        # Open location selector dialog
-        from core.location_selector import LocationSelector
-        LocationSelector(
-            parent=self.root,
-            employee_id=f"GROUP_{len(self.group_employees)}",  # Group identifier
-            callback=on_location_selected
-        )
-    
-    def process_group_checkout(self, location):
-        """Process checkout for all employees in the group"""
-        successful_checkouts = []
-        failed_checkouts = []
-        
-        current_time = self.attendance_manager.get_current_time()
-        
-        for emp in self.group_employees:
-            employee_id = emp['employee_id']
-            
-            # Record attendance
-            record_id = self.db.record_attendance(employee_id, "manual", "out", "check", current_time)
-            
-            if record_id:
-                # Prepare location data for attendance record
-                location_data = {
-                    "location_name": location.get('name', ''),
-                    "address": location.get('address', '')
-                }
-                
-                # Update the attendance record with location information
-                success = self.db.update_attendance_location(record_id, location_data)
-                
-                if success:
-                    successful_checkouts.append(emp['name'])
-                    
-                    # Also save to location manager for favorites/history
-                    self.location_manager.save_checkout_location(
-                        record_id, employee_id, location
-                    )
-                else:
-                    failed_checkouts.append(emp['name'])
-            else:
-                failed_checkouts.append(emp['name'])
-        
-        # Show results
-        location_name = location.get('name', 'Selected location')
-        if successful_checkouts:
-            if len(successful_checkouts) == 1:
-                # Single employee checkout
-                success_msg = f"✓ {successful_checkouts[0]} checked out\n📍 Going to: {location_name}"
-            else:
-                # Multiple employee checkout
-                success_names = ', '.join(successful_checkouts)
-                success_msg = f"✓ Group checkout successful!\n👥 {len(successful_checkouts)} employees\n📍 Going to: {location_name}\n\nEmployees: {success_names}"
-            
-            if failed_checkouts:
-                fail_names = ', '.join(failed_checkouts)
-                success_msg += f"\n\n⚠️ Failed: {fail_names}"
-            self.show_success_message(success_msg)
-        else:
-            self.show_error_message("✗ Checkout failed for all employees")
-        
-        # Clear group data
-        self.group_employees.clear()
-        
-        # Update attendance history
-        self.update_attendance_history()
-        
-        print(f"[GROUP DEBUG] Group checkout completed - Success: {len(successful_checkouts)}, Failed: {len(failed_checkouts)}")
+
     
     # DEPRECATED: QR codes now process directly without confirmation
     # def show_qr_recognition_confirmation(self, qr_code, employee):
@@ -3063,31 +1470,133 @@ class SimpleKioskApp:
             self.stop_camera()
             print(f"[CONFIRMATION DEBUG] Camera turned OFF after face recognition")
             
-            # Create confirmation dialog using messagebox for reliability
-            employee_role = employee.get('role', 'Staff')
+            # Create custom dialog for larger size and font
+            dialog = tk.Toplevel(self.root)
+            dialog.title("Confirm Face Recognition")
+            dialog.transient(self.root)  # Set to be on top of main window
+            dialog.grab_set()  # Modal dialog
+            
+            # Make dialog larger
+            dialog_width = 600
+            dialog_height = 500
+            dialog.geometry(f"{dialog_width}x{dialog_height}")
+            dialog.resizable(True, True)
+            
+            # Center the dialog on screen
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            x = (screen_width - dialog_width) // 2
+            y = (screen_height - dialog_height) // 2
+            dialog.geometry(f"+{x}+{y}")
+            
+            # Configure font sizes
+            text_font = ("Arial", 14)
+            button_font = ("Arial", 12, "bold")
+            
+            # Create dialog content
+            employee_role = employee.get('roles', [])
             role_icon = '🛡️' if employee_role == 'Security' else '👥'
-            message = f"Face Recognition Confirmation\n\nRecognized: {face['name']}\nEmployee ID: {face['employee_id']}\nRole: {role_icon} {employee_role}\nConfidence: {face.get('confidence', 0.0)*100:.2f}%\n\nIs this recognition correct?"
-
-            print(f"[CONFIRMATION DEBUG] Showing messagebox")
-            result = messagebox.askyesno("Confirm Face Recognition", message)
+            confidence = face.get('confidence', 0.0) * 100
+            
+            # Main frame with padding
+            main_frame = tk.Frame(dialog, padx=20, pady=20)
+            main_frame.pack(fill=tk.BOTH, expand=True)
+            
+            # Recognition details in a frame
+            details_frame = tk.Frame(main_frame)
+            details_frame.pack(fill=tk.BOTH, expand=True, pady=20)
+            
+            # Employee details with larger font
+            details_text = f"Recognized: {face['name']}\n\n"
+            details_text += f"Employee ID: {face['nric']}\n\n"
+            details_text += f"Role: {role_icon} {employee_role}\n\n"
+            details_text += f"Confidence: {confidence:.2f}%"
+            
+            details_label = tk.Label(
+                details_frame,
+                text=details_text,
+                font=text_font,
+                justify=tk.LEFT,
+                pady=20
+            )
+            details_label.pack()
+            
+            # Question
+            question_label = tk.Label(
+                main_frame,
+                text="Is this recognition correct?",
+                font=text_font,
+                fg="#e74c3c",
+                pady=10
+            )
+            question_label.pack()
+            
+            # Button frame
+            button_frame = tk.Frame(main_frame)
+            button_frame.pack(pady=20)
+            
+            # Store the result
+            self.confirmation_result = None
+            
+            def on_yes():
+                self.confirmation_result = True
+                dialog.destroy()
+                
+            def on_no():
+                self.confirmation_result = False
+                dialog.destroy()
+            
+            # Yes button (green)
+            yes_button = tk.Button(
+                button_frame,
+                text="✓ YES - Correct",
+                font=button_font,
+                bg="#27ae60",
+                fg="white",
+                padx=30,
+                pady=10,
+                command=on_yes
+            )
+            yes_button.pack(side=tk.LEFT, padx=20)
+            
+            # No button (red)
+            no_button = tk.Button(
+                button_frame,
+                text="✗ NO - Try Again",
+                font=button_font,
+                bg="#e74c3c",
+                fg="white",
+                padx=30,
+                pady=10,
+                command=on_no
+            )
+            no_button.pack(side=tk.LEFT, padx=20)
+            
+            # Make buttons focusable and bind Enter/Escape keys
+            yes_button.focus_set()
+            dialog.bind('<Return>', lambda e: on_yes())
+            dialog.bind('<Escape>', lambda e: on_no())
+            
+            # Wait for dialog to close
+            self.root.wait_window(dialog)
+            
+            # Process result after dialog closes
+            result = self.confirmation_result
             print(f"[CONFIRMATION DEBUG] User response: {result}")
             
             # Process result
             if result:
                 # User confirmed - process attendance
                 success, message = self.process_attendance_with_location_check(
-                    face['employee_id'], "face_recognition"
+                    face['nric'], "face_recognition"
                 )
                 
                 if success:
                     print(f"[FACE DEBUG] Attendance success: {message}")
                     if message != "Location selection initiated":
                         self.show_success_message(f"✓ {employee['name']} - {message}")
-                        # Play success beep for successful attendance
-                        # self.()
                 else:
                     print(f"[FACE DEBUG] Attendance failed: {message}")
-                    # Play error beep for failed attendance
                     
                     # Check if this is an early clock-out error
                     if self.is_early_clockout_error(message):
@@ -3101,7 +1610,6 @@ class SimpleKioskApp:
             else:
                 # User rejected - keep camera OFF, let them manually try again
                 print(f"[FACE DEBUG] Recognition rejected by user: {face['name']}")
-                # Play error beep when user rejects recognition
                 
                 self.show_error_message("❌ Face recognition rejected\n\nPress + to try recognition again")
                 
@@ -3226,14 +1734,6 @@ class SimpleKioskApp:
         )
         message_label.pack(pady=(0, 10))
         
-        # Shift info
-        shift_label = ctk.CTkLabel(
-            main_frame,
-            text=f"Current Shift: {shift_name}",
-            font=ctk.CTkFont(size=12)
-        )
-        shift_label.pack(pady=(0, 20))
-        
         # Current time display
         current_time = datetime.now().strftime("%I:%M %p")
         time_label = ctk.CTkLabel(
@@ -3301,23 +1801,11 @@ class SimpleKioskApp:
         if employees_with_vectors:
             print(f"[FACE DEBUG] Found {len(employees_with_vectors)} employees with face vectors")
             for emp in employees_with_vectors:
-                print(f"[FACE DEBUG] - {emp['name']} ({emp['employee_id']}): Vector loaded")
+                print(f"[FACE DEBUG] - {emp['name']} ({emp['nric']}): Vector loaded")
             # Pass the database manager instead of the list
             self.face_recognition.load_known_faces(self.db)
         else:
-            # Fallback to old image-based method for backward compatibility
-            print("[FACE DEBUG] No face vectors found, falling back to face images...")
-            employees_with_faces = self.db.get_all_face_images()
-            print(f"[FACE DEBUG] Found {len(employees_with_faces)} employees with face images")
-            
-            if employees_with_faces:
-                print("[FACE DEBUG] ⚠️  Consider running migration to convert images to vectors!")
-                for emp in employees_with_faces:
-                    print(f"[FACE DEBUG] - {emp['name']} ({emp['employee_id']}): {emp.get('face_image_path', 'No image path')}")
-                
-                # For backward compatibility, we'll need to convert images to vectors on-the-fly
-                # This is less efficient but ensures the system continues working
-                self.convert_and_load_legacy_faces(employees_with_faces)
+            print("[FACE DEBUG] No face vectors found")
     
     def convert_and_load_legacy_faces(self, employees_with_faces):
         """Convert legacy face images to vectors on-the-fly (for backward compatibility)"""
@@ -3332,7 +1820,7 @@ class SimpleKioskApp:
                     face_vector, _ = self.face_recognition.extract_face_embedding_hybrid(img)
                     if face_vector is not None:
                         converted_employees.append({
-                            'employee_id': emp['employee_id'],
+                            'nric': emp['nric'],
                             'name': emp['name'],
                             'face_vector': face_vector
                         })
@@ -3350,7 +1838,7 @@ class SimpleKioskApp:
                 # Convert and save each employee's face vector
                 try:
                     success = self.db.add_employee_with_face_vector(
-                        employee_id=emp['employee_id'],
+                        nric=emp['nric'],
                         name=emp['name'],
                         face_vector=emp['face_vector'],
                         department=emp.get('department', 'Unknown')
@@ -3364,14 +1852,9 @@ class SimpleKioskApp:
             self.face_recognition.load_known_faces(self.db)
     
     def update_attendance_history(self):
-        """Update the attendance history display for the current mode"""
-        # Determine which history frame to update based on current mode
-        if self.attendance_mode == "CLOCK":
-            history_frame = self.clock_history_frame
-            mode_filter = "clock"
-        else:  # CHECK
-            history_frame = self.check_history_frame
-            mode_filter = "check"
+        """Update the unified attendance history display"""
+        # Use the unified history frame
+        history_frame = self.unified_history_frame
         
         # Clear existing history
         for widget in history_frame.winfo_children():
@@ -3380,37 +1863,36 @@ class SimpleKioskApp:
         # Get today's attendance with explicit date check
         attendance_records = self.db.get_attendance_today()
         
-        # Debug: Show what date we're filtering for
+        # Filter for today's records (all types - clock and check)
         current_date = datetime.now().strftime("%Y-%m-%d")
-        print(f"[ATTENDANCE DEBUG] Looking for {mode_filter} records on: {current_date}")
-        print(f"[ATTENDANCE DEBUG] Found {len(attendance_records)} total records")
-        
-        # Filter for today's records and current mode
-        mode_records = []
+        unified_records = []
         for record in attendance_records:
             record_date = record['timestamp'][:10]  # Extract YYYY-MM-DD part
-            if record_date == current_date and record.get('attendance_type') == mode_filter:
-                mode_records.append(record)
+            if record_date == current_date:
+                unified_records.append(record)
         
-        print(f"[ATTENDANCE DEBUG] After filtering for {mode_filter} mode: {len(mode_records)} records")
-        
-        if not mode_records:
+        if not unified_records:
             no_records_label = ctk.CTkLabel(
                 history_frame,
-                text=f"No {mode_filter.upper()} records for {current_date}",
+                text=f"No attendance records for {current_date}",
                 font=ctk.CTkFont(size=16),
                 text_color="gray"
             )
             no_records_label.pack(pady=20)
             return
         
-        # Group records by employee and keep all records (not just latest)
+        # Group records by employee and keep all records (both clock and check)
         employee_records = {}
-        for record in mode_records:  # Use filtered records
-            emp_id = record['employee_id']
+        for record in unified_records:  # Use all filtered records
+            emp_id = record['nric']
             if emp_id not in employee_records:
+                # Get employee info from database to include role
+                employee_info = self.db.get_employee(emp_id)
+                role = employee_info.get('role', 'Staff') if employee_info else 'Staff'
+                
                 employee_records[emp_id] = {
                     'name': record['name'],
+                    'role': role,
                     'records': []
                 }
             employee_records[emp_id]['records'].append(record)
@@ -3421,12 +1903,12 @@ class SimpleKioskApp:
         
         # Display all records for each employee
         for emp_id, data in employee_records.items():
-            self.create_employee_history_section(emp_id, data, history_frame)
+            self.create_employee_history_section_unified(emp_id, data, history_frame)
     
-    def create_employee_history_section(self, employee_id, data, history_frame):
-        """Create a section showing all attendance records for one employee"""
-        # Main frame for this employee - enhanced styling with more space
-        border_color = ("green", "lightgreen") if self.attendance_mode == "CLOCK" else ("blue", "lightblue")
+    def create_employee_history_section_unified(self, nric, data, history_frame):
+        """Create a section showing all attendance records for one employee in unified view"""
+        # Main frame for this employee - enhanced styling with purple theme for unified view
+        border_color = ("#8A2BE2", "#DDA0DD")  # BlueViolet and Plum colors
         main_frame = ctk.CTkFrame(
             history_frame, 
             border_width=2, 
@@ -3436,104 +1918,188 @@ class SimpleKioskApp:
         main_frame.pack(fill="x", padx=8, pady=12)
         
         # Employee header - larger and more prominent
-        header_frame = ctk.CTkFrame(main_frame, fg_color=("blue", "darkblue"))
+        header_frame = ctk.CTkFrame(main_frame, fg_color=("#8A2BE2", "#663399"))  # BlueViolet and RebeccaPurple
         header_frame.pack(fill="x", padx=6, pady=6)
         
         # Employee info in horizontal layout
-        info_container = ctk.CTkFrame(header_frame, fg_color="transparent")
-        info_container.pack(fill="x", padx=12, pady=8)
+        info_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
+        info_frame.pack(fill="x", padx=20, pady=15)
         
-        # Employee name and ID - larger font
+        # Left side - name and ID
+        left_frame = ctk.CTkFrame(info_frame, fg_color="transparent")
+        left_frame.pack(side="left", fill="x", expand=True)
+        
+        # Get role with appropriate icon
+        role = data.get('role', 'Staff')
+        
         name_label = ctk.CTkLabel(
-            info_container,
-            text=f"👤 {data['name']}",
-            font=ctk.CTkFont(size=22, weight="bold"),
-            text_color="white",
+            left_frame,
+            text=f"👤 {data['name']} ({role})",
+            font=ctk.CTkFont(size=24, weight="bold"),
+            text_color="white"
+        )
+        name_label.pack(anchor="w")
+        
+        id_label = ctk.CTkLabel(
+            left_frame,
+            text=f"ID: {nric}",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color="white"
+        )
+        id_label.pack(anchor="w")
+        
+        # Right side - current status info
+        right_frame = ctk.CTkFrame(info_frame, fg_color="transparent")
+        right_frame.pack(side="right")
+        
+        # Get the latest record to determine current status
+        latest_record = data['records'][0] if data['records'] else None
+        
+        if latest_record:
+            attendance_type = latest_record.get('attendance_type', 'check').lower()
+            status = latest_record.get('status', 'unknown').lower()
+            
+            # Format the status text
+            if attendance_type == 'clock':
+                if status == 'in':
+                    current_status = "Clock In"
+                else:
+                    current_status = "Clock Out"
+            else:  # check
+                if status == 'in':
+                    current_status = "Check In"
+                else:
+                    current_status = "Check Out"
+        else:
+            current_status = "No Records"
+        
+        status_label = ctk.CTkLabel(
+            right_frame,
+            text=f"Current Status: {current_status}",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color="white"
+        )
+        status_label.pack()
+        
+        # Records container
+        records_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        records_frame.pack(fill="x", padx=8, pady=4)
+        
+        # Display each record
+        for i, record in enumerate(data['records']):
+            self.create_record_entry_unified(record, records_frame, i)
+    
+    def create_record_entry_unified(self, record, records_frame, index):
+        """Create a single attendance record entry for unified view - larger fonts and better spacing"""
+        # Record frame with better styling - increased height for larger fonts
+        bg_color = ("gray90", "gray20") if index % 2 == 0 else ("white", "gray25")
+        record_frame = ctk.CTkFrame(records_frame, fg_color=bg_color, height=50)
+        record_frame.pack(fill="x", pady=2, padx=5)
+        record_frame.pack_propagate(False)
+        
+        # Parse timestamp
+        record_time = datetime.strptime(record['timestamp'], "%Y-%m-%d %H:%M:%S")
+        time_str = record_time.strftime("%H:%M:%S")
+        
+        # Status and type indicators
+        status_text = "IN" if record['status'] == 'in' else "OUT"
+        status_color = "lightgreen" if record['status'] == 'in' else "red"
+        status_icon = "⚫"
+        
+        attendance_type = record.get('attendance_type', 'check').upper()
+        type_color = "green" if attendance_type == 'CLOCK' else "blue"
+        type_icon = "🕐" if attendance_type == 'CLOCK' else "✅"
+        
+        # Method indicator (shorter)
+        method_text = {
+            'face_recognition': '👤 Face',
+            'qr_code': '🔍 QR', 
+            'manual': '⌨️ Manual'
+        }.get(record['method'], f"📋 {record['method']}")
+        
+        # Single line layout with better proportions to fill the width
+        info_frame = ctk.CTkFrame(record_frame, fg_color="transparent")
+        info_frame.pack(fill="both", expand=True, padx=12, pady=8)
+        
+        # Time (fixed width for alignment)
+        time_label = ctk.CTkLabel(
+            info_frame,
+            text=time_str,
+            font=ctk.CTkFont(size=18, weight="bold"),
+            width=120,  # Fixed width for consistent alignment
             anchor="w"
         )
-        name_label.pack(side="left", fill="x", expand=True)
+        time_label.pack(side="left", padx=(0, 10))
         
-        # Employee ID badge
-        id_label = ctk.CTkLabel(
-            info_container,
-            text=f"ID: {employee_id}",
+        # Create separate labels for better alignment
+        # Type label (fixed width)
+        type_label = ctk.CTkLabel(
+            info_frame,
+            text=f"{type_icon} {attendance_type}",
             font=ctk.CTkFont(size=16, weight="bold"),
-            text_color="lightgray",
-            anchor="e"
+            text_color=type_color,
+            width=120,  # Fixed width for TYPE column
+            anchor="w"
         )
-        id_label.pack(side="right", padx=10)
+        type_label.pack(side="left", padx=(0, 5))
         
-        # Current status (based on most recent record) - larger and more prominent
-        latest_record = data['records'][0]  # Most recent record (first in descending order)
+        # Status label (fixed width)
+        status_label = ctk.CTkLabel(
+            info_frame,
+            text=f"{status_icon} {status_text}",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=type_color,
+            width=80,  # Fixed width for STATUS column
+            anchor="w"
+        )
+        status_label.pack(side="left", padx=(0, 5))
         
-        # Determine status text based on attendance type and status
-        attendance_type = latest_record.get('attendance_type', 'check')
-        if attendance_type == 'clock':
-            if latest_record['status'] == 'in':
-                current_status = "LATE CLOCKED IN" if latest_record.get('late', False) else "CLOCKED IN"
-            else:
-                current_status = "CLOCKED OUT"
-        else:  # check
-            current_status = "CHECKED IN" if latest_record['status'] == 'in' else "CHECKED OUT"
+        # Special indicators (LATE/OT) with fixed width
+        special_indicator_label = ctk.CTkLabel(
+            info_frame,
+            text="",  # Default empty
+            font=ctk.CTkFont(size=16, weight="bold"),
+            width=100,  # Fixed width for special indicators
+            anchor="w"
+        )
         
-        status_color = "lightgreen" if latest_record['status'] == 'in' else "red"
-        status_icon = "🟢" if latest_record['status'] == 'in' else "🔴"
-        
-        # Status in a separate frame for better visibility
-        status_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
-        status_frame.pack(fill="x", padx=12, pady=5)
-        
-        # Check if this is a late status to highlight "LATE" in red
-        if latest_record.get('late', False) and attendance_type == 'clock' and latest_record['status'] == 'in':
-            # Create horizontal frame for mixed color text
-            mixed_status_frame = ctk.CTkFrame(status_frame, fg_color="transparent")
-            mixed_status_frame.pack(pady=3)
-            
-            # Status prefix
-            prefix_label = ctk.CTkLabel(
-                mixed_status_frame,
-                text=f"{status_icon} CURRENT STATUS: ",
-                font=ctk.CTkFont(size=18, weight="bold"),
-                text_color=status_color
+        # Add LATE indicator with orange color
+        if record.get('late', False) and attendance_type == 'CLOCK':
+            special_indicator_label.configure(
+                text="⚠️ LATE",
+                text_color="orange"
             )
-            prefix_label.pack(side="left")
-            
-            # LATE in red
-            late_label = ctk.CTkLabel(
-                mixed_status_frame,
-                text="LATE ",
-                font=ctk.CTkFont(size=18, weight="bold"),
-                text_color="red"
+        # Add OT indicator with purple color
+        elif record.get('overtime_hours', 0) > 0 and attendance_type == 'CLOCK' and status_text == 'OUT':
+            ot_hours = record.get('overtime_hours', 0)
+            special_indicator_label.configure(
+                text=f"🕐 OT {ot_hours}h",
+                text_color="purple"
             )
-            late_label.pack(side="left")
-            
-            # Rest of status
-            rest_label = ctk.CTkLabel(
-                mixed_status_frame,
-                text="CLOCKED IN",
-                font=ctk.CTkFont(size=18, weight="bold"),
-                text_color=status_color
-            )
-            rest_label.pack(side="left")
-        else:
-            # Normal single-color status
-            status_label = ctk.CTkLabel(
-                status_frame,
-                text=f"{status_icon} CURRENT STATUS: {current_status}",
-                font=ctk.CTkFont(size=18, weight="bold"),
-                text_color=status_color,
-                anchor="center"
-            )
-            status_label.pack(pady=3)
         
-        # Records list
-        records_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
-        records_frame.pack(fill="x", padx=10, pady=(0, 10))
+        special_indicator_label.pack(side="left", padx=(0, 10))
         
-        # Show all records for this employee (chronological order)
-        for i, record in enumerate(data['records']):
-            self.create_single_record_entry(records_frame, record, i)
-    
+        # Method (fixed width for alignment)
+        method_label = ctk.CTkLabel(
+            info_frame,
+            text=method_text,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            width=130,  # Fixed width for consistent alignment
+            anchor="w"
+        )
+        method_label.pack(side="left", padx=(0, 10))
+        
+        # Location (if applicable) - fill remaining space with larger font
+        if attendance_type == 'CHECK' and status_text == 'OUT' and record.get('location_name'):
+            location_label = ctk.CTkLabel(
+                info_frame,
+                text=f"📍 {record['location_name']}",
+                font=ctk.CTkFont(size=20, weight="normal"),
+                text_color="red",
+                anchor="w"
+            )
+            location_label.pack(side="left", fill="x", expand=True)
+
     def create_single_record_entry(self, parent, record, index):
         """Create a single attendance record entry - enhanced for larger display"""
         # Record frame with better styling and more space
@@ -3705,7 +2271,7 @@ class SimpleKioskApp:
         # Clear the camera display and show manual activation instructions
         self.camera_label.configure(
             image="", 
-            text="📷 Camera Off\n\nPress Numpad +\nto activate camera for recognition\n\nManual Recognition Mode"
+            text="📷 Camera Off\n\nPress Numpad +\nto activate camera for recognition"
         )
         print("[CAMERA DEBUG] Camera stopped")
     
@@ -4445,13 +3011,13 @@ class SimpleKioskApp:
                 late_status = 'LATE' if is_late else 'ON-TIME'
                 
                 # Get employee role
-                employee_data = self.db.get_employee(record['employee_id'])
+                employee_data = self.db.get_employee(record['nric'])
                 employee_role = employee_data.get('role', 'Staff') if employee_data else 'Staff'
                 role_display = f"🛡️ {employee_role}" if employee_role == 'Security' else f"👥 {employee_role}"
                 
                 # Write row data
                 row_data = [
-                    record['employee_id'],
+                    record['nric'],
                     record['name'],
                     role_display,
                     date_part,
@@ -4707,7 +3273,7 @@ class SimpleKioskApp:
                 late_status = 'LATE' if is_late else 'ON-TIME'
                 
                 row_data = [
-                    record['employee_id'],
+                    record['nric'],
                     record['name'],
                     date_part,
                     time_part,
@@ -4936,7 +3502,7 @@ class SimpleKioskApp:
             return
         
         for face in recognized_faces:
-            if face['employee_id']:
+            if face['nric']:
                 # Check if personal scanning is active
                 if hasattr(self, 'personal_scanning_active') and self.personal_scanning_active:
                     # Auto-fill employee ID in personal dialog
@@ -4945,8 +3511,8 @@ class SimpleKioskApp:
                             # Check if widget is still valid before using it
                             if self.personal_id_entry.winfo_exists():
                                 self.personal_id_entry.delete(0, tk.END)
-                                self.personal_id_entry.insert(0, face['employee_id'])
-                                print(f"[PERSONAL DEBUG] Face recognition auto-filled: {face['employee_id']}")
+                                self.personal_id_entry.insert(0, face['nric'])
+                                print(f"[PERSONAL DEBUG] Face recognition auto-filled: {face['nric']}")
                             else:
                                 print("[PERSONAL DEBUG] Personal entry widget no longer exists")
                                 self.personal_scanning_active = False  # Reset flag if widget is gone
@@ -4963,8 +3529,8 @@ class SimpleKioskApp:
                             # Check if widget is still valid before using it
                             if self.group_current_id.winfo_exists():
                                 self.group_current_id.delete(0, tk.END)
-                                self.group_current_id.insert(0, face['employee_id'])
-                                print(f"[GROUP DEBUG] Face recognition auto-filled: {face['employee_id']}")
+                                self.group_current_id.insert(0, face['nric'])
+                                print(f"[GROUP DEBUG] Face recognition auto-filled: {face['nric']}")
                             else:
                                 print("[GROUP DEBUG] Group entry widget no longer exists")
                                 self.group_scanning_active = False  # Reset flag if widget is gone
@@ -4973,8 +3539,8 @@ class SimpleKioskApp:
                             self.group_scanning_active = False  # Reset flag on error
                     return
                 
-                print(f"[FACE DEBUG] Recognized employee: {face['name']} ({face['employee_id']})")
-                employee = self.db.get_employee(face['employee_id'])
+                print(f"[FACE DEBUG] Recognized employee: {face['name']} ({face['nric']})")
+                employee = self.db.get_employee(face['nric'])
                 
                 # Show confirmation dialog before processing attendance
                 self.show_face_recognition_confirmation(face, employee)
@@ -4987,31 +3553,30 @@ class SimpleKioskApp:
         if detected_codes and len(detected_codes) > 0:
             # Get the first detected code and extract the employee ID
             first_code = detected_codes[0]
-            employee_id = first_code.get('employee_id')
+            nric = first_code.get('data')
             
-            if employee_id:  # Valid employee ID found
+            if nric:  # Valid employee ID found
+                print(f"[DEBUG] nric is truthy: '{nric}'")
                 # Check if personal scanning is active
                 if hasattr(self, 'personal_scanning_active') and self.personal_scanning_active:
-                    # Auto-fill employee ID in personal dialog
                     if hasattr(self, 'personal_id_entry'):
                         self.personal_id_entry.delete(0, tk.END)
-                        self.personal_id_entry.insert(0, employee_id)
-                        print(f"[PERSONAL DEBUG] QR scan auto-filled: {employee_id}")
+                        self.personal_id_entry.insert(0, nric)
+                        print(f"[PERSONAL DEBUG] QR scan auto-filled: {nric}")
                     return
                 
                 # Check if group scanning is active
                 if hasattr(self, 'group_scanning_active') and self.group_scanning_active:
-                    # Auto-fill employee ID in group dialog
                     if hasattr(self, 'group_current_id'):
                         self.group_current_id.delete(0, tk.END)
-                        self.group_current_id.insert(0, employee_id)
-                        print(f"[GROUP DEBUG] QR scan auto-filled: {employee_id}")
+                        self.group_current_id.insert(0, nric)
+                        print(f"[GROUP DEBUG] QR scan auto-filled: {nric}")
                     return
                 
-                print(f"[QR SCAN DEBUG] Detected QR/Barcode: '{employee_id}' from data: '{first_code.get('data')}'")
-                employee = self.db.get_employee(employee_id)
+                print(f"[QR SCAN DEBUG] Detected QR/Barcode: '{nric}' from data: '{first_code.get('data')}'")
+                employee = self.db.get_employee(nric)
                 if employee:
-                    print(f"[QR SCAN DEBUG] Found employee: {employee['name']} ({employee['employee_id']})")
+                    print(f"[QR SCAN DEBUG] Found employee: {employee['name']} ({employee['nric']})")
                     
                     # Play detection beep when QR code is recognized
                     self.play_scan_detected_beep()
@@ -5025,7 +3590,7 @@ class SimpleKioskApp:
                     
                     # Process attendance directly
                     success, message = self.process_attendance_with_location_check(
-                        employee['employee_id'], "qr_code"
+                        employee['nric'], "qr_code"
                     )
                     
                     if success:
@@ -5047,10 +3612,14 @@ class SimpleKioskApp:
                     print(f"[QR SCAN DEBUG] Employee not found in database")
                     # Play error beep for unknown employee
                     
-                    self.show_error_message(f"✗ Employee {employee_id} not found")
+                    self.show_error_message(f"✗ Employee {nric} not found")
             else:
                 print(f"[QR SCAN DEBUG] Invalid QR code data: '{first_code.get('data')}'")
-                # Play error beep for invalid QR format
+                print(f"[DEBUG] nric is falsy: {nric}")
+                print(f"[DEBUG] First code data: '{first_code.get('data')}'")
+                print(f"[DEBUG] First code type: '{first_code.get('type')}'")
+
+                print(f"[DEBUG] After extract_employee_id: '{nric}'")
                 
                 self.show_error_message(f"✗ Invalid QR code format")
             return
@@ -5201,6 +3770,154 @@ class SimpleKioskApp:
         except Exception as e:
             print(f"[CAMERA RESTART] Failed to restart camera: {e}")
     
+    def _calculate_face_center(self, bbox):
+        """Calculate center point of face bounding box"""
+        x1, y1, x2, y2 = bbox
+        center_x = (x1 + x2) / 2
+        center_y = (y1 + y2) / 2
+        return center_x, center_y
+    
+    def _calculate_face_distance(self, center1, center2, face_size):
+        """Calculate normalized distance between two face centers"""
+        import math
+        distance = math.sqrt((center1[0] - center2[0])**2 + (center1[1] - center2[1])**2)
+        return distance / face_size  # Normalize by face size
+    
+    def _should_trigger_recognition(self, face_bbox, detection_confidence):
+        """
+        Determine if face recognition should be triggered based on detection stability
+        
+        Args:
+            face_bbox: Face bounding box (x1, y1, x2, y2)
+            detection_confidence: Face detection confidence
+            
+        Returns:
+            bool: True if recognition should be triggered
+        """
+        if not self.face_warmup_enabled:
+            return True  # Skip warm-up if disabled
+        
+        current_time = time.time()
+        self.frame_counter += 1
+        
+        # Calculate face properties
+        x1, y1, x2, y2 = face_bbox
+        face_center = self._calculate_face_center(face_bbox)
+        face_size = max(x2 - x1, y2 - y1)  # Use larger dimension as face size
+        
+        # Create face identifier based on position (for tracking across frames)
+        face_id = f"face_{int(face_center[0]/50)}_{int(face_center[1]/50)}"  # Grid-based ID
+        
+        # Check recognition cooldown
+        if current_time - self.last_recognition_time < self.recognition_cooldown:
+            return False
+        
+        # Initialize or update face tracking
+        if face_id not in self.face_detection_history:
+            self.face_detection_history[face_id] = {
+                'first_seen': self.frame_counter,
+                'last_seen': self.frame_counter,
+                'centers': [face_center],
+                'confidences': [detection_confidence],
+                'bbox_history': [face_bbox],
+                'stable_frames': 1
+            }
+            print(f"[WARMUP] New face detected: {face_id} at frame {self.frame_counter}")
+            return False
+        
+        face_data = self.face_detection_history[face_id]
+        face_data['last_seen'] = self.frame_counter
+        face_data['centers'].append(face_center)
+        face_data['confidences'].append(detection_confidence)
+        face_data['bbox_history'].append(face_bbox)
+        
+        # Keep only recent history (last N frames)
+        max_history = self.face_warmup_frames * 2
+        if len(face_data['centers']) > max_history:
+            face_data['centers'] = face_data['centers'][-max_history:]
+            face_data['confidences'] = face_data['confidences'][-max_history:]
+            face_data['bbox_history'] = face_data['bbox_history'][-max_history:]
+        
+        # Check if face has been stable for enough frames
+        consecutive_frames = self.frame_counter - face_data['first_seen'] + 1
+        
+        if consecutive_frames >= self.face_warmup_frames:
+            # Check face stability (movement should be minimal)
+            recent_centers = face_data['centers'][-self.face_warmup_frames:]
+            is_stable = True
+            
+            for i in range(1, len(recent_centers)):
+                distance = self._calculate_face_distance(recent_centers[0], recent_centers[i], face_size)
+                if distance > self.face_warmup_stability_threshold:
+                    is_stable = False
+                    break
+            
+            # Check confidence stability
+            recent_confidences = face_data['confidences'][-self.face_warmup_frames:]
+            avg_confidence = sum(recent_confidences) / len(recent_confidences)
+            min_confidence = min(recent_confidences)
+            
+            confidence_stable = min_confidence > 0.5 and avg_confidence > 0.7
+            
+            if is_stable and confidence_stable:
+                print(f"[WARMUP] Face {face_id} is stable for {consecutive_frames} frames - triggering recognition")
+                print(f"[WARMUP] Average confidence: {avg_confidence:.3f}, Min confidence: {min_confidence:.3f}")
+                self.last_recognition_time = current_time
+                
+                # Clean up old detections to prevent memory buildup
+                self._cleanup_old_face_detections()
+                return True
+            else:
+                stability_reason = "movement" if not is_stable else "confidence"
+                print(f"[WARMUP] Face {face_id} not stable ({stability_reason}) - frames: {consecutive_frames}")
+                return False
+        
+        print(f"[WARMUP] Face {face_id} warming up - frames: {consecutive_frames}/{self.face_warmup_frames}")
+        return False
+    
+    def _cleanup_old_face_detections(self):
+        """Clean up old face detection history to prevent memory buildup"""
+        current_frame = self.frame_counter
+        cleanup_threshold = self.face_warmup_frames * 5  # Keep history for 5x warmup period
+        
+        faces_to_remove = []
+        for face_id, face_data in self.face_detection_history.items():
+            if current_frame - face_data['last_seen'] > cleanup_threshold:
+                faces_to_remove.append(face_id)
+        
+        for face_id in faces_to_remove:
+            del self.face_detection_history[face_id]
+            print(f"[WARMUP] Cleaned up old face detection: {face_id}")
+    
+    def _draw_warmup_status(self, display_frame, face_bbox, face_id, frames_remaining):
+        """Draw warm-up status on the display frame"""
+        x1, y1, x2, y2 = face_bbox
+        
+        # Draw progress bar above the face
+        bar_width = x2 - x1
+        bar_height = 8
+        bar_x = x1
+        bar_y = y1 - 20
+        
+        # Background bar
+        cv2.rectangle(display_frame, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), (50, 50, 50), -1)
+        
+        # Progress bar
+        progress = max(0, (self.face_warmup_frames - frames_remaining) / self.face_warmup_frames)
+        progress_width = int(bar_width * progress)
+        
+        if progress_width > 0:
+            color = (0, 255, 255) if frames_remaining > 0 else (0, 255, 0)  # Yellow warming up, green ready
+            cv2.rectangle(display_frame, (bar_x, bar_y), (bar_x + progress_width, bar_y + bar_height), color, -1)
+        
+        # Text
+        warmup_text = f"Warming up... {self.face_warmup_frames - frames_remaining}/{self.face_warmup_frames}"
+        if frames_remaining <= 0:
+            warmup_text = "Ready for recognition!"
+        
+        cv2.putText(display_frame, warmup_text, (bar_x, bar_y - 5), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+    
     def _process_ultra_light_detection(self, frame, display_frame, display_width, display_height, width, height):
         """Process frame using Ultra Light Face Detection for maximum performance"""
         recognized_faces = []
@@ -5239,14 +3956,17 @@ class SimpleKioskApp:
                     face_region = frame[y1:y2, x1:x2]
                     
                     # Perform face recognition on the detected face
-                    employee_id = None
+                    nric = None
                     employee_name = "Unknown"
                     recognition_confidence = 0.0
                     
                     print(f"[ULTRA DEBUG] Face region size: {face_region.shape if face_region.size > 0 else 'empty'}")
                     print(f"[ULTRA DEBUG] Bbox coordinates: ({x1}, {y1}, {x2}, {y2})")
                     
-                    if face_region.size > 0 and face_region.shape[0] > 20 and face_region.shape[1] > 20:  # Valid face region with minimum size
+                    # Check if face recognition should be triggered (warm-up system)
+                    should_recognize = self._should_trigger_recognition(face_data['bbox'], confidence)
+                    
+                    if face_region.size > 0 and face_region.shape[0] > 20 and face_region.shape[1] > 20 and should_recognize:  # Valid face region and passed warm-up
                         try:
                             print(f"[ULTRA DEBUG] Calling DeepFace recognition on face region...")
                             print(f"[ULTRA DEBUG] Face region shape: {face_region.shape}")
@@ -5274,38 +3994,68 @@ class SimpleKioskApp:
                                     print(f"[ULTRA DEBUG] Padded recognition returned: ID={recognized_id}, confidence={rec_conf}")
                             
                             if recognized_id:
-                                employee_id = recognized_id
+                                nric = recognized_id
                                 recognition_confidence = rec_conf
-                                # Get employee name from known faces
-                                if recognized_id in self.face_recognition.known_faces:
-                                    employee_name = self.face_recognition.known_faces[recognized_id].get('name', recognized_id)
-                                print(f"[ULTRA RECOGNITION] Face recognized: {employee_name} ({employee_id}) confidence: {rec_conf:.2f}")
+                                # Get employee name from database instead of known_faces
+                                # This is more reliable as the recognition now returns NRIC not username
+                                db_employee = self.db.get_employee(nric)
+                                if db_employee:
+                                    employee_name = db_employee.get('name', nric)
+                                else:
+                                    employee_name = nric  # Fallback if employee not found
+                                print(f"[ULTRA RECOGNITION] Face recognized: {employee_name} ({nric}) confidence: {rec_conf:.2f}")
                             else:
                                 print(f"[ULTRA RECOGNITION] Face detected but not recognized (detection conf: {confidence:.2f})")
                         except Exception as rec_error:
                             print(f"[ULTRA RECOGNITION] Recognition error: {rec_error}")
+                    elif face_region.size > 0 and face_region.shape[0] > 20 and face_region.shape[1] > 20:
+                        print(f"[ULTRA DEBUG] Face region valid but warm-up not complete - skipping recognition")
                     else:
                         print(f"[ULTRA DEBUG] Face region too small or invalid for recognition")
                     
                     # Create face data in format expected by main drawing system
                     is_best = best_face and face_data['id'] == best_face['id']
                     
-                    if employee_id:
+                    # Get warm-up status for display
+                    face_center = self._calculate_face_center(face_data['bbox'])
+                    face_id = f"face_{int(face_center[0]/50)}_{int(face_center[1]/50)}"
+                    
+                    warmup_status = ""
+                    frames_remaining = self.face_warmup_frames  # Default for new faces
+                    
+                    if self.face_warmup_enabled and face_id in self.face_detection_history:
+                        face_data_history = self.face_detection_history[face_id]
+                        frames_seen = self.frame_counter - face_data_history['first_seen'] + 1
+                        frames_remaining = max(0, self.face_warmup_frames - frames_seen)
+                        
+                        if frames_remaining > 0:
+                            warmup_status = f" [WARMUP {frames_seen}/{self.face_warmup_frames}]"
+                        else:
+                            warmup_status = " [READY]"
+                    elif self.face_warmup_enabled:
+                        warmup_status = f" [WARMUP 1/{self.face_warmup_frames}]"
+                    
+                    if nric:
                         # Recognized face
-                        label = f"{employee_name} ({recognition_confidence:.2f})"
+                        label = f"{employee_name} ({recognition_confidence:.2f}){warmup_status}"
                     else:
                         # Detected but unrecognized face
-                        label = f"Face Detected ({confidence:.2f})"
+                        if should_recognize:
+                            label = f"Face Detected ({confidence:.2f}){warmup_status}"
+                        else:
+                            label = f"Face Detected ({confidence:.2f}){warmup_status}"
                     
                     if is_best:
                         label += " [BEST]"
                     
                     face_result = {
-                        'name': employee_name if employee_id else label,
-                        'employee_id': employee_id,  # Now includes actual recognition results
-                        'confidence': recognition_confidence if employee_id else confidence,
+                        'name': employee_name if nric else label,
+                        'nric': nric,  # Now includes actual recognition results
+                        'confidence': recognition_confidence if nric else confidence,
                         'position': (display_x1, display_y1, display_x2 - display_x1, display_y2 - display_y1),
-                        'is_best': is_best
+                        'is_best': is_best,
+                        'warmup_status': warmup_status.strip(),
+                        'warmup_frames_remaining': frames_remaining
                     }
                     display_faces_with_labels.append(face_result)
                     
@@ -5377,7 +4127,7 @@ class SimpleKioskApp:
                             print(f"[CONFIDENCE NOTICE] Low confidence detection: {face_confidence:.2f} < {CONFIDENCE_THRESHOLD}")
                             display_result = {
                                 'name': 'Low Confidence',
-                                'employee_id': None,
+                                'nric': None,
                                 'confidence': face_confidence,
                                 'position': (display_x, display_y, display_w, display_h)
                             }
@@ -5387,16 +4137,16 @@ class SimpleKioskApp:
                             # High confidence face - process normally
                             display_result = {
                                 'name': face.get('name'),
-                                'employee_id': face.get('employee_id'),
+                                'nric': face.get('nric'),
                                 'confidence': face.get('confidence', 0.0),
                                 'position': (display_x, display_y, display_w, display_h)
                             }
                             display_faces_with_labels.append(display_result)
                             
                             # Store recognized faces for attendance processing
-                            if face['employee_id']:
+                            if face['nric']:
                                 recognized_faces.append(face)
-                                print(f"[FACE DEBUG] Recognized: {face['name']} (ID: {face['employee_id']}, confidence: {face['confidence']:.2f})")
+                                print(f"[FACE DEBUG] Recognized: {face['name']} (ID: {face['nric']}, confidence: {face['confidence']:.2f})")
                 
                 # Draw faces with proper labels using pure DeepFace results
                 display_frame = self.face_recognition.draw_face_boxes_from_results(display_frame, display_faces_with_labels)
@@ -5448,6 +4198,167 @@ class SimpleKioskApp:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
         return result_frame
+    
+    def toggle_group_mode(self):
+        """Toggle group check mode on/off"""
+        is_group_mode = self.group_check_var.get()
+        
+        if is_group_mode:
+            # Enable group mode
+            self.group_list_frame.pack(fill="x", padx=15, pady=(0, 10))
+            # Adjust camera label size to make room
+            self.camera_label.configure(height=250)  # Reduce height when group mode is on
+            print("[GROUP MODE] Group check mode enabled")
+        else:
+            # Disable group mode
+            self.group_list_frame.pack_forget()
+            # Restore camera label size
+            self.camera_label.configure(height=400)  # Restore full height
+            # Clear group list when disabling
+            self.clear_group_list()
+            print("[GROUP MODE] Group check mode disabled")
+    
+    def add_employee_to_group(self, nric, employee_name):
+        """Add an employee to the group check list"""
+        # Check if already in list
+        for emp in self.group_employees:
+            if emp['nric'] == nric:
+                # Don't show notification here - it will be shown by the calling method
+                # to maintain consistency with other group error notifications
+                return False
+        
+        # Add to group
+        self.group_employees.append({
+            'nric': nric,
+            'name': employee_name
+        })
+        
+        # Update display
+        self.update_group_display()
+        print(f"[GROUP MODE] Added {employee_name} ({nric}) to group list")
+        return True
+    
+    def update_group_display(self):
+        """Update the visual display of the group list"""
+        # Clear existing widgets in scroll frame
+        for widget in self.group_scroll_frame.winfo_children():
+            widget.destroy()
+        
+        # Add each employee to the display
+        for i, emp in enumerate(self.group_employees):
+            emp_frame = ctk.CTkFrame(self.group_scroll_frame)
+            emp_frame.pack(fill="x", padx=5, pady=2)
+            
+            # Employee info
+            emp_label = ctk.CTkLabel(
+                emp_frame,
+                text=f"{i+1}. {emp['name']} (ID: {emp['nric']})",
+                font=ctk.CTkFont(size=12),
+                anchor="w"
+            )
+            emp_label.pack(side="left", fill="x", expand=True, padx=10, pady=5)
+            
+            # Remove button
+            remove_btn = ctk.CTkButton(
+                emp_frame,
+                text="✕",
+                font=ctk.CTkFont(size=12),
+                width=30,
+                height=25,
+                fg_color="red",
+                hover_color="darkred",
+                command=lambda idx=i: self.remove_from_group(idx)
+            )
+            remove_btn.pack(side="right", padx=5, pady=2)
+        
+        # Update button states
+        has_employees = len(self.group_employees) > 0
+        self.process_group_btn.configure(state="normal" if has_employees else "disabled")
+    
+    def remove_from_group(self, index):
+        """Remove an employee from the group list"""
+        if 0 <= index < len(self.group_employees):
+            removed_emp = self.group_employees.pop(index)
+            self.update_group_display()
+            print(f"[GROUP MODE] Removed {removed_emp['name']} from group list")
+    
+    def clear_group_list(self):
+        """Clear the entire group list"""
+        self.group_employees.clear()
+        self.update_group_display()
+        print("[GROUP MODE] Group list cleared")
+    
+    def process_group_checkout(self):
+        """Process checkout for all employees in the group"""
+        if not self.group_employees:
+            self.show_temp_message("No employees in group list!", "orange")
+            return
+        
+        # Show location selector for the group
+        def on_location_selected(location):
+            if location:
+                successful_checkouts = []
+                failed_checkouts = []
+                
+                current_time = self.attendance_manager.get_current_time()
+                
+                for emp in self.group_employees:
+                    nric = emp['nric']
+                    employee_name = emp['name']
+                    
+                    # Record attendance
+                    record_id = self.db.record_attendance(nric, "manual", "out", "check", current_time)
+                    
+                    if record_id:
+                        # Prepare location data for attendance record
+                        location_data = {
+                            "location_name": location.get('name', ''),
+                            "address": location.get('address', '')
+                        }
+                        
+                        # Update location for this record
+                        success = self.db.update_attendance_location(record_id, location_data)
+                        
+                        if success:
+                            successful_checkouts.append(employee_name)
+                            print(f"[GROUP CHECKOUT] Successfully checked out {employee_name} with location")
+                        else:
+                            failed_checkouts.append(employee_name)
+                            print(f"[GROUP CHECKOUT] Failed to save location for {employee_name}")
+                    else:
+                        failed_checkouts.append(employee_name)
+                        print(f"[GROUP CHECKOUT] Failed to record attendance for {employee_name}")
+                
+                # Show results
+                location_name = location.get('name', 'Selected location')
+                if successful_checkouts:
+                    if len(successful_checkouts) == 1:
+                        success_msg = f"✅ Group checkout successful!\n\n{successful_checkouts[0]} checked out at {location_name}"
+                    else:
+                        success_msg = f"✅ Group checkout successful!\n\n{len(successful_checkouts)} employees checked out at {location_name}"
+                    
+                    if failed_checkouts:
+                        success_msg += f"\n\n⚠️ Failed: {', '.join(failed_checkouts)}"
+                    
+                    self.show_success_message(success_msg)
+                else:
+                    self.show_error_message("✗ Group checkout failed for all employees")
+                
+                # Clear group list and update history
+                self.clear_group_list()
+                self.update_attendance_history()
+                
+                print(f"[GROUP CHECKOUT] Completed - Success: {len(successful_checkouts)}, Failed: {len(failed_checkouts)}")
+            else:
+                print("[GROUP CHECKOUT] Location selection cancelled")
+        
+        # Open location selector dialog
+        from core.location_selector import LocationSelector
+        LocationSelector(
+            parent=self.root,
+            nric=f"GROUP_{len(self.group_employees)}",  # Group identifier
+            callback=on_location_selected
+        )
 
 def main():
     """Run the simple kiosk application"""

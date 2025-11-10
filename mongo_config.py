@@ -1,10 +1,11 @@
 MONGODB_CONFIG = {
     
-    "connection_string": "mongodb+srv://admin:admin@cluster0.r9ddy.mongodb.net/attendance_system?retryWrites=true&w=majority",
+    "connection_string": "mongodb://admin:admin@192.168.8.41:27016/attendance_system?authSource=admin", #prod db
+    # "connection_string": "mongodb://admin:admin@192.168.8.41:27017/attendance_system?authSource=admin", # stag db
+
     
     "fallback_connections": [
-        "mongodb://localhost:27017/",  
-        "mongodb://127.0.0.1:27017/",  
+        "mongodb://admin:admin@192.168.8.41:27015/attendance_system?authSource=admin",
     ],
     
     "atlas_connection": "mongodb+srv://admin:admin@cluster0.r9ddy.mongodb.net/attendance_system?retryWrites=true&w=majority",

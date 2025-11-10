@@ -58,7 +58,7 @@ class BarcodeScanner:
                             'data': data,
                             'type': barcode_type,
                             'points': points,
-                            'employee_id': self.extract_employee_id(data)
+                            'nric': self.extract_nric(data)
                         })
                         
                         print(f"[BARCODE] Detected {barcode_type}: {data}")
@@ -79,7 +79,7 @@ class BarcodeScanner:
                             'data': data,
                             'type': 'QR_CODE',
                             'points': points.astype(int) if points is not None else None,
-                            'employee_id': self.extract_employee_id(data)
+                            'nric': self.extract_nric(data)
                         })
                         print(f"[BARCODE] Detected QR_CODE (OpenCV): {data}")
                         
@@ -92,41 +92,21 @@ class BarcodeScanner:
             print(f"[BARCODE] Error scanning frame: {e}")
             return []
     
-    def extract_employee_id(self, data):
-        """Extract employee ID from QR code/barcode data"""
+    def extract_nric(self, data):
+        """Extract NRIC from QR code/barcode data"""
         # Clean the data
         data = data.strip()
         
-        # Pattern 1: Direct employee ID (alphanumeric, 3-10 characters)
-        if re.match(r'^[A-Za-z0-9]{3,10}$', data):
-            return data.upper()  # Convert to uppercase for consistency
-        
-        # Pattern 2: Numeric only (for pure numeric employee IDs)
         if re.match(r'^\d{3,8}$', data):
             return data
-        
-        # Pattern 3: JSON-like format (e.g., {"employee_id": "ABC123"}) - Check this FIRST before prefix patterns
-        json_match = re.search(r'"?employee_id"?\s*:\s*"?([A-Za-z0-9]{3,10})"?', data, re.IGNORECASE)
-        if json_match:
-            return json_match.group(1).upper()
-        
-        # Pattern 4: URL-like format (e.g., "attendance://employee/ABC123")
-        url_match = re.search(r'attendance://(?:employee|staff)/([A-Za-z0-9]{3,10})', data, re.IGNORECASE)
-        if url_match:
-            return url_match.group(1).upper()
-        
-        # Pattern 5: Employee ID with prefix (e.g., "EMP:12345", "ID:ABC123") - Check this LAST to avoid conflicts
-        emp_match = re.search(r'(?:EMP|ID|STAFF)[\s:]*([A-Za-z0-9]{3,10})', data, re.IGNORECASE)
-        if emp_match:
-            return emp_match.group(1).upper()
         
         # If no pattern matches, return None
         return None
     
-    def validate_employee_id(self, barcode_data):
-        """Validate if barcode data is a valid employee ID format"""
-        return self.extract_employee_id(barcode_data)
-    
+    def validate_nric(self, barcode_data):
+        """Validate if barcode data is a valid NRIC format"""
+        return self.extract_nric(barcode_data)
+
     def draw_barcode_boxes(self, frame, detected_codes):
         """Draw bounding boxes around detected QR codes and barcodes"""
         for code in detected_codes:
@@ -138,12 +118,12 @@ class BarcodeScanner:
                 # Prepare display text
                 barcode_type = code['type']
                 data = code['data']
-                employee_id = code.get('employee_id')
+                nric = code.get('nric')
                 
                 # Create informative text
-                if employee_id:
-                    text = f"{barcode_type}: {employee_id} ✓"
-                    text_color = (0, 255, 0)  # Green for valid employee ID
+                if nric:
+                    text = f"{barcode_type}: {nric} ✓"
+                    text_color = (0, 255, 0)  # Green for valid NRIC
                 else:
                     text = f"{barcode_type}: {data[:20]}..." if len(data) > 20 else f"{barcode_type}: {data}"
                     text_color = (0, 165, 255)  # Orange for unrecognized data
@@ -164,18 +144,18 @@ class BarcodeScanner:
     def process_video_frame(self, frame):
         """Process a video frame and return detected employee IDs"""
         detected_codes = self.scan_frame(frame)
-        valid_employee_ids = []
+        valid_nric = []
         
         for code in detected_codes:
-            employee_id = code.get('employee_id')
-            if employee_id:
-                valid_employee_ids.append({
-                    'employee_id': employee_id,
+            nric = code.get('nric')
+            if nric:
+                valid_nric.append({
+                    'nric': nric,
                     'type': code['type'],
                     'points': code.get('points')
                 })
         
-        return valid_employee_ids, detected_codes
+        return valid_nric, detected_codes
     
     def get_scanner_info(self):
         """Get information about scanner capabilities"""
@@ -203,18 +183,18 @@ class BarcodeScanner:
         }
 
 class QRCodeGenerator:
-    """Generate QR codes for employee IDs using OpenCV"""
+    """Generate QR codes for NRICs using OpenCV"""
     
     @staticmethod
-    def generate_qr_code_opencv(employee_id):
-        """Generate QR code data for an employee ID that can be displayed"""
+    def generate_qr_code_opencv(nric):
+        """Generate QR code data for an NRIC that can be displayed"""
         # This is a simple text representation
         # For actual QR code generation, you'd need the qrcode library
-        return f"Employee ID: {employee_id}"
-    
+        return f"NRIC: {nric}"
+
     @staticmethod
-    def generate_qr_code(employee_id, save_path=None):
-        """Generate QR code for an employee ID (requires qrcode library)"""
+    def generate_qr_code(nric, save_path=None):
+        """Generate QR code for an NRIC (requires qrcode library)"""
         try:
             import qrcode
             from PIL import Image
@@ -226,7 +206,7 @@ class QRCodeGenerator:
                 box_size=10,
                 border=4,
             )
-            qr.add_data(employee_id)
+            qr.add_data(nric)
             qr.make(fit=True)
             
             # Create image

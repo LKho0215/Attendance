@@ -5,6 +5,47 @@ import numpy as np
 from bson import ObjectId
 
 class MongoDBManager:
+    def get_attendance_by_date(self, nric, date):
+        """Get all attendance records for a specific employee on a specific date (date: datetime.date)"""
+        try:
+            if not self.ensure_connection():
+                print("[MONGODB ERROR] Cannot establish connection for get_attendance_by_date query")
+                return []
+            start_datetime = datetime.combine(date, datetime.min.time())
+            end_datetime = datetime.combine(date, datetime.max.time())
+            pipeline = [
+                {"$match": {
+                    "nric": nric,
+                    "timestamp": {"$gte": start_datetime, "$lte": end_datetime}
+                }},
+                {"$lookup": {
+                    "from": "employees",
+                    "localField": "nric",
+                    "foreignField": "nric",
+                    "as": "employee"
+                }},
+                {"$unwind": "$employee"},
+                {"$sort": {"timestamp": 1}},
+                {"$project": {
+                    "id": {"$toString": "$_id"},
+                    "nric": 1,
+                    "name": "$employee.name",
+                    "timestamp": {"$dateToString": {"date": "$timestamp", "format": "%Y-%m-%d %H:%M:%S"}},
+                    "method": 1,
+                    "status": 1,
+                    "attendance_type": 1,
+                    "late": {"$ifNull": ["$late", False]},
+                    "overtime_hours": {"$ifNull": ["$overtime_hours", 0]},
+                    "location_name": {"$ifNull": ["$location_name", ""]},
+                    "address": {"$ifNull": ["$address", ""]}
+                }}
+            ]
+            records = list(self.attendance.aggregate(pipeline))
+            print(f"[MONGODB] Found {len(records)} attendance records for {nric} on {date}")
+            return records
+        except Exception as e:
+            print(f"[MONGODB ERROR] Failed to get attendance by date: {e}")
+            return []
     def __init__(self, connection_string=None, database_name=None):
         """
         Initialize MongoDB connection
@@ -97,24 +138,14 @@ class MongoDBManager:
         try:
             # Employees collection
             self.employees = self.db.employees
-            # Create unique index on employee_id
-            self.employees.create_index("employee_id", unique=True)
+            self.employees.create_index("nric", unique=True)
             
             # Attendance collection
             self.attendance = self.db.attendance
             # Create indexes for better query performance
-            self.attendance.create_index("employee_id")
+            self.attendance.create_index("nric")
             self.attendance.create_index("timestamp")
-            self.attendance.create_index([("employee_id", 1), ("timestamp", -1)])
-            
-            # Location history collection
-            self.location_history = self.db.location_history
-            self.location_history.create_index("employee_id")
-            self.location_history.create_index("timestamp")
-            
-            # Favorite locations collection
-            self.favorite_locations = self.db.favorite_locations
-            self.favorite_locations.create_index("employee_id")
+            self.attendance.create_index([("nric", 1), ("timestamp", -1)])
             
             print("[MONGODB] Collections and indexes initialized")
             
@@ -125,41 +156,19 @@ class MongoDBManager:
         """Get current timestamp as datetime object"""
         return datetime.now()
     
-    def add_employee(self, employee_id, name, department=None, role="Staff", face_image_path=None):
-        """Add a new employee to the database"""
+    def get_employee(self, nric):
+        """Get employee information by NRIC"""
         try:
-            employee_doc = {
-                "employee_id": employee_id,
-                "name": name,
-                "department": department,
-                "role": role,
-                "face_image_path": face_image_path,
-                "created_at": datetime.now()
-            }
-            
-            result = self.employees.insert_one(employee_doc)
-            print(f"[MONGODB] Added employee: {name} ({employee_id}) - {role}")
-            return True
-            
-        except Exception as e:
-            if "duplicate key" in str(e).lower():
-                print(f"[MONGODB] Employee ID {employee_id} already exists")
-                return False
-            print(f"[MONGODB ERROR] Failed to add employee: {e}")
-            return False
-    
-    def get_employee(self, employee_id):
-        """Get employee information by employee ID"""
-        try:
-            employee = self.employees.find_one({"employee_id": employee_id})
+            employee = self.employees.find_one({"nric": nric})
             
             if employee:
                 return {
-                    'employee_id': employee['employee_id'],
+                    'nric': employee['nric'],  # Include nric in returned dictionary
+                    'username': employee['username'],
                     'name': employee['name'],
                     'department': employee.get('department'),
-                    'role': employee.get('role', 'Staff'),
-                    'face_image_path': employee.get('face_image_path')
+                    'roles': employee.get('roles', []),
+                    'face_vectors': employee.get('face_vectors', [])
                 }
             return None
             
@@ -177,41 +186,18 @@ class MongoDBManager:
             employees = self.employees.find({}).sort("name", 1)
             return [
                 {
-                    'employee_id': emp['employee_id'],
+                    'username': emp['username'],
+                    'nric': emp['nric'],
                     'name': emp['name'],
                     'department': emp.get('department', ''),
-                    'role': emp.get('role', 'Staff'),
-                    'face_vector': emp.get('face_vector')  # Include face vector for DeepFace recognition
+                    'roles': emp.get('roles', []),
+                    'face_vectors': emp.get('face_vectors', [])
                 }
                 for emp in employees
             ]
             
         except Exception as e:
             print(f"[MONGODB ERROR] Failed to get employees: {e}")
-            return []
-    
-    def get_all_face_images(self):
-        """Get all employees with face images (legacy method for backward compatibility)"""
-        try:
-            # Ensure connection is alive
-            if not self.ensure_connection():
-                return []
-                
-            employees = self.employees.find({
-                "face_image_path": {"$ne": None, "$ne": ""}
-            })
-            
-            return [
-                {
-                    'employee_id': emp['employee_id'],
-                    'name': emp['name'],
-                    'face_image_path': emp['face_image_path']
-                }
-                for emp in employees
-            ]
-            
-        except Exception as e:
-            print(f"[MONGODB ERROR] Failed to get face images: {e}")
             return []
     
     def get_all_face_vectors(self):
@@ -221,110 +207,44 @@ class MongoDBManager:
             if not self.ensure_connection():
                 return []
                 
+            # Look for both new format (face_vectors - plural) and legacy format (face_vector - singular)
             employees = self.employees.find({
-                "face_vector": {"$ne": None, "$exists": True}
+                "$or": [
+                    {"face_vectors": {"$ne": None, "$exists": True}},
+                    {"face_vector": {"$ne": None, "$exists": True}}
+                ]
             })
             
-            return [
-                {
-                    'employee_id': emp['employee_id'],
+            result = []
+            for emp in employees:
+                employee_data = {
+                    'username': emp['username'],
+                    'nric': emp['nric'],
                     'name': emp['name'],
                     'department': emp.get('department'),
-                    'role': emp.get('role', 'Staff'),
-                    'face_vector': emp['face_vector']
+                    'roles': emp.get('roles', []),
+
                 }
-                for emp in employees
-            ]
+                
+                # Check for new format first (face_vectors - plural array)
+                if 'face_vectors' in emp and emp['face_vectors']:
+                    employee_data['face_vectors'] = emp['face_vectors']
+                    print(f"[MONGODB] Loaded {len(emp['face_vectors'])} face vectors for {emp['name']} ({emp['username']})")
+                # Fallback to legacy format (face_vector - singular)
+                elif 'face_vector' in emp and emp['face_vector']:
+                    employee_data['face_vector'] = emp['face_vector']
+                    print(f"[MONGODB] Loaded legacy face vector for {emp['name']} ({emp['username']})")
+
+                result.append(employee_data)
+            
+            return result
             
         except Exception as e:
             print(f"[MONGODB ERROR] Failed to get face vectors: {e}")
             return []
     
-    def update_employee_face_image(self, employee_id, face_image_path):
-        """Update an employee's face image path (legacy method)"""
-        try:
-            result = self.employees.update_one(
-                {"employee_id": employee_id},
-                {"$set": {"face_image_path": face_image_path}}
-            )
-            
-            if result.matched_count > 0:
-                print(f"[MONGODB] Updated face image for employee {employee_id}")
-                return True
-            else:
-                print(f"[MONGODB] Employee {employee_id} not found")
-                return False
-                
-        except Exception as e:
-            print(f"[MONGODB ERROR] Failed to update face image: {e}")
-            return False
-    
-    def update_employee_face_vector(self, employee_id, face_vector):
-        """Update an employee's face vector (new vectorized method)"""
-        try:
-            # Ensure face_vector is a list for JSON serialization
-            if isinstance(face_vector, np.ndarray):
-                face_vector = face_vector.tolist()
-            
-            result = self.employees.update_one(
-                {"employee_id": employee_id},
-                {"$set": {"face_vector": face_vector, "face_vector_updated": self.get_current_timestamp()}}
-            )
-            
-            if result.matched_count > 0:
-                print(f"[MONGODB] Updated face vector for employee {employee_id}")
-                return True
-            else:
-                print(f"[MONGODB] Employee {employee_id} not found")
-                return False
-                
-        except Exception as e:
-            print(f"[MONGODB ERROR] Failed to update face vector: {e}")
-            return False
-    
-    def add_employee_with_face_vector(self, employee_id, name, face_vector, department=None, role="Staff"):
-        """Add a new employee with face vector"""
-        try:
-            # Ensure face_vector is a list for JSON serialization
-            if isinstance(face_vector, np.ndarray):
-                face_vector = face_vector.tolist()
-                
-            employee_data = {
-                "employee_id": employee_id,
-                "name": name,
-                "department": department,
-                "role": role,
-                "face_vector": face_vector,
-                "face_vector_created": self.get_current_timestamp(),
-                "created_at": self.get_current_timestamp()
-            }
-            
-            result = self.employees.insert_one(employee_data)
-            if result.inserted_id:
-                print(f"[MONGODB] Added employee {employee_id} ({role}) with face vector")
-                return True
-            return False
-            
-        except Exception as e:
-            print(f"[MONGODB ERROR] Failed to add employee with face vector: {e}")
-            return False
-    
-    def has_face_vector(self, employee_id):
-        """Check if an employee has a face vector stored"""
-        try:
-            employee = self.employees.find_one(
-                {"employee_id": employee_id},
-                {"face_vector": 1}
-            )
-            
-            return employee and employee.get('face_vector') is not None
-            
-        except Exception as e:
-            print(f"[MONGODB ERROR] Failed to check face vector: {e}")
-            return False
-    
-    def record_attendance(self, employee_id, method, status="in", attendance_type="check", timestamp=None, location_data=None, late=False):
-        """Record attendance for an employee with optional location data for CHECK OUT and late flag"""
+    def record_attendance(self, nric, method, status="in", attendance_type="check", timestamp=None, location_data=None, late=False, overtime_hours=0):
+        """Record attendance for an employee with optional location data for CHECK OUT, late flag, and overtime hours"""
         try:
             # Ensure connection is alive
             if not self.ensure_connection():
@@ -334,30 +254,37 @@ class MongoDBManager:
                 timestamp = datetime.now()
             
             attendance_doc = {
-                "employee_id": employee_id,
+                "nric": nric,
                 "timestamp": timestamp,
                 "method": method,
                 "status": status,
                 "attendance_type": attendance_type,
-                "late": late  # Add late flag
+                "late": late,
+                "overtime_hours": overtime_hours
             }
             
-            # Add location information for CHECK OUT records
             if attendance_type == "check" and status == "out" and location_data:
                 attendance_doc.update({
                     "location_name": location_data.get("location_name", ""),
                     "address": location_data.get("address", "")
                 })
+                
+                # Add checkout type if provided
+                if location_data.get("type"):
+                    attendance_doc["type"] = location_data.get("type")
+                    print(f"[MONGODB] Recording CHECK OUT type: {location_data.get('type')}")
+                
                 print(f"[MONGODB] Recording CHECK OUT with location: {location_data.get('location_name', 'Unknown')} - {location_data.get('address', '')}")
             
             result = self.attendance.insert_one(attendance_doc)
             
-            # Update log message to indicate late status
             status_msg = f"{attendance_type} {status}"
             if late and attendance_type == "clock" and status == "in":
                 status_msg = f"LATE {attendance_type} {status}"
-            
-            print(f"[MONGODB] Recorded {status_msg} for employee {employee_id}")
+            elif overtime_hours > 0 and attendance_type == "clock" and status == "out":
+                status_msg = f"{attendance_type} {status} (OT {overtime_hours}h)"
+
+            print(f"[MONGODB] Recorded {status_msg} for employee {nric}")
             return str(result.inserted_id)
             
         except Exception as e:
@@ -378,13 +305,26 @@ class MongoDBManager:
                 "address": location_data.get("address", "")
             }
             
+            # Add checkout type (personal or work)
+            if location_data.get("type"):
+                update_data["type"] = location_data.get("type")
+                print(f"[MONGODB] Recording checkout type: {location_data.get('type')}")
+            
+            # Add emergency information if present
+            if location_data.get("emergency_clockout"):
+                update_data["emergency_clockout"] = True
+                update_data["emergency_reason"] = location_data.get("emergency_reason", "")
+                print(f"[MONGODB] Recording EMERGENCY CLOCK-OUT: {location_data.get('emergency_reason', 'No reason provided')}")
+            
             result = self.attendance.update_one(
                 {"_id": ObjectId(record_id)},
                 {"$set": update_data}
             )
             
             if result.matched_count > 0:
-                print(f"[MONGODB] Updated attendance record {record_id} with location: {location_data.get('location_name', 'Unknown')}")
+                emergency_flag = " [EMERGENCY]" if location_data.get("emergency_clockout") else ""
+                type_flag = f" [{location_data.get('type', 'work').upper()}]" if location_data.get("type") else ""
+                print(f"[MONGODB] Updated attendance record {record_id} with location: {location_data.get('location_name', 'Unknown')}{type_flag}{emergency_flag}")
                 return True
             else:
                 print(f"[MONGODB] Attendance record {record_id} not found")
@@ -395,18 +335,14 @@ class MongoDBManager:
             return False
     
     def get_attendance_today(self):
-        """Get today's attendance records"""
         try:
-            # Ensure connection is alive
             if not self.ensure_connection():
                 print("[MONGODB ERROR] Cannot establish connection for attendance query")
                 return []
                 
-            # Get start and end of today
             today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
             today_end = datetime.now().replace(hour=23, minute=59, second=59, microsecond=999999)
             
-            # Aggregation pipeline to join with employees collection
             pipeline = [
                 {
                     "$match": {
@@ -416,8 +352,8 @@ class MongoDBManager:
                 {
                     "$lookup": {
                         "from": "employees",
-                        "localField": "employee_id",
-                        "foreignField": "employee_id",
+                        "localField": "nric",
+                        "foreignField": "nric",
                         "as": "employee"
                     }
                 },
@@ -430,8 +366,10 @@ class MongoDBManager:
                 {
                     "$project": {
                         "id": {"$toString": "$_id"},
-                        "employee_id": 1,
+                        "username": "$employee.username",
+                        "nric": "$employee.nric",
                         "name": "$employee.name",
+                        "roles": "$employee.roles",
                         "timestamp": {"$dateToString": {"date": "$timestamp", "format": "%Y-%m-%d %H:%M:%S"}},
                         "method": 1,
                         "status": 1,
@@ -480,8 +418,8 @@ class MongoDBManager:
                 {
                     "$lookup": {
                         "from": "employees",
-                        "localField": "employee_id",
-                        "foreignField": "employee_id",
+                        "localField": "nric",
+                        "foreignField": "nric",
                         "as": "employee"
                     }
                 },
@@ -494,13 +432,15 @@ class MongoDBManager:
                 {
                     "$project": {
                         "id": {"$toString": "$_id"},
-                        "employee_id": 1,
+                        "username": "$employee.username",
+                        "nric": "$employee.nric",
                         "name": "$employee.name",
                         "timestamp": {"$dateToString": {"date": "$timestamp", "format": "%Y-%m-%d %H:%M:%S"}},
                         "method": 1,
                         "status": 1,
                         "attendance_type": 1,
                         "late": {"$ifNull": ["$late", False]},
+                        "overtime_hours": {"$ifNull": ["$overtime_hours", 0]},
                         "location_name": {"$ifNull": ["$location_name", ""]},
                         "address": {"$ifNull": ["$address", ""]}
                     }
@@ -532,8 +472,8 @@ class MongoDBManager:
                 {
                     "$lookup": {
                         "from": "employees",
-                        "localField": "employee_id",
-                        "foreignField": "employee_id",
+                        "localField": "nric",
+                        "foreignField": "nric",
                         "as": "employee"
                     }
                 },
@@ -545,7 +485,8 @@ class MongoDBManager:
                 },
                 {
                     "$project": {
-                        "employee_id": 1,
+                        "username": "$employee.username",
+                        "nric": "$employee.nric",
                         "name": "$employee.name",
                         "timestamp": {"$dateToString": {"date": "$timestamp", "format": "%Y-%m-%d %H:%M:%S"}},
                         "method": 1,
@@ -563,26 +504,6 @@ class MongoDBManager:
         except Exception as e:
             print(f"[MONGODB ERROR] Failed to get attendance history: {e}")
             return []
-    
-    def delete_employee(self, employee_id):
-        """Delete an employee and their attendance records"""
-        try:
-            # Delete attendance records first
-            attendance_result = self.attendance.delete_many({"employee_id": employee_id})
-            
-            # Delete employee
-            employee_result = self.employees.delete_one({"employee_id": employee_id})
-            
-            if employee_result.deleted_count > 0:
-                print(f"[MONGODB] Deleted employee {employee_id} and {attendance_result.deleted_count} attendance records")
-                return True
-            else:
-                print(f"[MONGODB] Employee {employee_id} not found")
-                return False
-                
-        except Exception as e:
-            print(f"[MONGODB ERROR] Failed to delete employee: {e}")
-            return False
     
     def check_connection(self):
         """Check if MongoDB connection is still alive"""
@@ -640,3 +561,31 @@ class MongoDBManager:
             print("[MONGODB] Connection closed")
         except Exception as e:
             print(f"[MONGODB ERROR] Failed to close connection: {e}")
+
+    def get_admin_settings(self):
+        """Get admin settings from database"""
+        try:
+            settings = self.db.admin_settings.find_one()
+            if settings:
+                # Remove MongoDB's _id field
+                settings.pop('_id', None)
+                return settings
+            return None
+        except Exception as e:
+            print(f"[MONGODB ERROR] Failed to get admin settings: {e}")
+            return None
+
+    def save_admin_settings(self, settings):
+        """Save admin settings to database"""
+        try:
+            # Update or insert settings (upsert)
+            self.db.admin_settings.replace_one(
+                {},  # Empty filter to match any document
+                settings,
+                upsert=True  # Create if doesn't exist
+            )
+            print("[MONGODB] Admin settings saved successfully")
+            return True
+        except Exception as e:
+            print(f"[MONGODB ERROR] Failed to save admin settings: {e}")
+            return False

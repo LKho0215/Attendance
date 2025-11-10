@@ -167,14 +167,14 @@ class AttendanceUltraLightDetector:
         timestamp = int(time.time() * 1000)  # milliseconds
         return f"face_{timestamp}_{self.face_id_counter}"
     
-    def save_face_for_attendance(self, face_data: Dict[str, Any], employee_id: str, 
+    def save_face_for_attendance(self, face_data: Dict[str, Any], nric: str, 
                                save_dir: str = "data/faces") -> Optional[str]:
         """
         Save a detected face for attendance/registration purposes
         
         Args:
             face_data: Face detection dictionary
-            employee_id: Employee ID for naming
+            nric: Employee ID for naming
             save_dir: Directory to save face images
             
         Returns:
@@ -188,7 +188,7 @@ class AttendanceUltraLightDetector:
             # Generate filename
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             face_hash = hashlib.md5(face_data['face_region'].tobytes()).hexdigest()[:8]
-            filename = f"{employee_id}_{timestamp}_{face_hash}.jpg"
+            filename = f"{nric}_{timestamp}_{face_hash}.jpg"
             full_path = save_path / filename
             
             # Save face image
