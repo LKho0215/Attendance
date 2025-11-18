@@ -50,6 +50,9 @@ class LocationSelector:
         self.dialog.grid_columnconfigure(0, weight=1)
         self.dialog.grid_rowconfigure(1, weight=1)
         
+        # Handle window close event (X button)
+        self.dialog.protocol("WM_DELETE_WINDOW", self.cancel_selection)
+        
         self.create_header()
         self.create_main_content()
         self.create_footer()
@@ -771,4 +774,7 @@ Or switch to Manual Input to type your location directly."""
     
     def cancel_selection(self):
         """Cancel location selection"""
+        print("[LOCATION DEBUG] Location selection cancelled")
+        # Call callback with None to indicate cancellation
+        self.callback(None)
         self.dialog.destroy()

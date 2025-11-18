@@ -445,8 +445,8 @@ class DeepFaceRecognitionSystem:
                     return None, 0.0
                 
                 # Additional confidence check - reject low confidence matches
-                if best_confidence < 0.70:  # Reduced from 0.75 to 0.70 since multiple vectors provide better accuracy
-                    logger.info(f"Recognition confidence too low: {best_confidence:.2f} < 0.70 for {best_match}")
+                if best_confidence < 0.65:  # Reduced from 0.75 to 0.70 since multiple vectors provide better accuracy
+                    logger.info(f"Recognition confidence too low: {best_confidence:.2f} < 0.65 for {best_match}")
                     return None, 0.0
                 
                 logger.info(f"Face recognized: {employee_name} ({best_match}) with distance {best_distance:.3f}, confidence {best_confidence:.2f}")
@@ -857,74 +857,6 @@ class DeepFaceRecognitionSystem:
         except Exception as e:
             logger.error(f"Error in hybrid frame processing: {e}")
             return []
-    
-    def recognize_face_simple(self, image_array: np.ndarray, confidence_threshold: float = None) -> Tuple[Optional[str], float]:
-        try:
-            face_embedding, _ = self.extract_face_embedding_hybrid(image_array)
-            
-            if face_embedding is None:
-                return None, 0.0
-            
-            if not self.known_faces:
-                logger.warning("No known faces loaded")
-                return None, 0.0
-            
-            threshold = confidence_threshold if confidence_threshold is not None else self.threshold
-            best_match = None
-            best_distance = float('inf')
-            
-            # Compare against all known faces - supporting multiple vectors per employee
-            for username, face_data in self.known_faces.items():
-                # Handle new format with multiple embeddings
-                if isinstance(face_data, dict) and 'embeddings' in face_data:
-                    known_embeddings = face_data['embeddings']
-                    
-                    # Compare against ALL stored vectors for this employee
-                    min_distance = float('inf')
-                    for known_embedding in known_embeddings:
-                        distance = self._calculate_distance(face_embedding, known_embedding)
-                        if distance < min_distance:
-                            min_distance = distance
-                    
-                    # Use the best (minimum) distance for this employee
-                    if min_distance < best_distance:
-                        best_distance = min_distance
-                        best_match = username
-                
-                # Handle legacy format for backward compatibility
-                elif isinstance(face_data, dict) and 'embedding' in face_data:
-                    known_embedding = face_data['embedding']
-                    distance = self._calculate_distance(face_embedding, known_embedding)
-                    if distance < best_distance:
-                        best_distance = distance
-                        best_match = username
-                
-                # Handle direct embedding format
-                else:
-                    known_embedding = face_data
-                    distance = self._calculate_distance(face_embedding, known_embedding)
-                    if distance < best_distance:
-                        best_distance = distance
-                        best_match = username
-            
-            # Check if best match is within threshold
-            if best_match and best_distance < self.distance_threshold:  # Use stricter distance_threshold
-                confidence = max(0.0, 1.0 - best_distance)
-                
-                # Additional confidence check - reject low confidence matches
-                if confidence < 0.70:  # Reduced from 0.75 to 0.70 since multiple vectors provide better accuracy
-                    logger.info(f"Simple recognition confidence too low: {confidence:.2f} < 0.70 for {best_match}")
-                    return None, 0.0
-                
-                logger.info(f"Simple face recognized: {best_match} with confidence {confidence:.2f}")
-                return best_match, confidence
-            else:
-                logger.debug(f"No face match found (best distance: {best_distance:.2f}, threshold: {self.distance_threshold})")
-                return None, 0.0
-                
-        except Exception as e:
-            logger.error(f"Error recognizing face: {e}")
-            return None, 0.0
     
     def draw_face_boxes_from_results(self, image_array: np.ndarray, results: List[dict]) -> np.ndarray:
         try:

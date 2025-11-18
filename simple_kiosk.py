@@ -15,8 +15,6 @@ import traceback
 import pygame
 import time
 from datetime import datetime, timedelta, time as dt_time
-from openpyxl import Workbook
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 
 # Audio feedback imports
 try:
@@ -126,12 +124,12 @@ class SimpleKioskApp:
         
         # Face detection warm-up system
         self.face_warmup_enabled = True  # Enable/disable warm-up system
-        self.face_warmup_frames = 3  # Number of consecutive frames required before recognition
-        self.face_warmup_stability_threshold = 0.1  # Maximum allowed face movement (as fraction of face size)
+        self.face_warmup_frames = 15  # Number of consecutive frames required before recognition (increased from 3)
+        self.face_warmup_stability_threshold = 0.08  # Maximum allowed face movement (reduced from 0.1 for more stability)
         self.face_detection_history = {}  # Track detected faces across frames
         self.frame_counter = 0  # Frame counter for tracking
         self.last_recognition_time = 0  # Prevent too frequent recognitions
-        self.recognition_cooldown = 2.0  # Seconds between recognitions for same face
+        self.recognition_cooldown = 3.0  # Seconds between recognitions for same face (increased from 2.0)
         
         # Create GUI
         self.create_interface()
@@ -153,15 +151,27 @@ class SimpleKioskApp:
         # Load known faces
         self.load_known_faces()
         
-        # Do NOT start camera automatically - start with camera OFF
-        # Camera will be activated manually when employee presses "+"
-        print("[INIT DEBUG] Camera initialized but NOT started - manual activation required")
+        # Start camera automatically on launch
+        print("[INIT DEBUG] Starting camera automatically...")
+        self.start_camera()
         
         # Setup keyboard shortcuts
         self.setup_keyboard_shortcuts()
         
         # Start update loop
         self.update_loop()
+    
+    def pause_camera_for_popup(self):
+        """Pause camera when any popup appears"""
+        if not self.main_camera_paused:
+            print("[CAMERA DEBUG] Pausing camera for popup...")
+            self.main_camera_paused = True
+    
+    def resume_camera_after_popup(self):
+        """Resume camera after popup closes"""
+        if self.main_camera_paused:
+            print("[CAMERA DEBUG] Resuming camera after popup closed")
+            self.main_camera_paused = False
     
     def setup_kiosk_mode(self):
         """Configure for kiosk operation"""
@@ -555,8 +565,6 @@ class SimpleKioskApp:
         self.root.bind('<minus>', lambda e: self.quit_app())                # Regular -
         self.root.bind('<KP_Add>', lambda e: self.toggle_camera())          # Numpad + (toggle camera)
         self.root.bind('<plus>', lambda e: self.toggle_camera())            # Regular + (toggle camera)
-        self.root.bind('<KP_Multiply>', lambda e: self.export_daily_csv())  # Numpad * (export CSV)
-        self.root.bind('<asterisk>', lambda e: self.export_daily_csv())     # Regular * (export CSV)
         
         # Additional convenient shortcuts
         self.root.bind('<Return>', lambda e: self.show_manual_entry())      # Enter key - manual entry only
@@ -598,9 +606,9 @@ class SimpleKioskApp:
                 
                 # Face recognition warm-up settings
                 self.face_warmup_enabled = settings.get('face_warmup_enabled', True)
-                self.face_warmup_frames = settings.get('face_warmup_frames', 3)
-                self.face_warmup_stability_threshold = settings.get('face_warmup_stability_threshold', 0.1)
-                self.recognition_cooldown = settings.get('recognition_cooldown', 2.0)
+                self.face_warmup_frames = settings.get('face_warmup_frames', 15)
+                self.face_warmup_stability_threshold = settings.get('face_warmup_stability_threshold', 0.08)
+                self.recognition_cooldown = settings.get('recognition_cooldown', 3.0)
                 
                 print(f"[SETTINGS] Loaded shift settings - Early: {self.early_shift_min_clockout}, Regular: {self.regular_shift_min_clockout}")
             else:
@@ -610,9 +618,9 @@ class SimpleKioskApp:
                 
                 # Face recognition warm-up settings defaults
                 self.face_warmup_enabled = True
-                self.face_warmup_frames = 3
-                self.face_warmup_stability_threshold = 0.1
-                self.recognition_cooldown = 2.0
+                self.face_warmup_frames = 15
+                self.face_warmup_stability_threshold = 0.08
+                self.recognition_cooldown = 3.0
                 
                 print(f"[SETTINGS] Using default shift settings - Early: {self.early_shift_min_clockout}, Regular: {self.regular_shift_min_clockout}")
             
@@ -627,9 +635,9 @@ class SimpleKioskApp:
             
             # Face recognition warm-up settings defaults
             self.face_warmup_enabled = True
-            self.face_warmup_frames = 3
-            self.face_warmup_stability_threshold = 0.1
-            self.recognition_cooldown = 2.0
+            self.face_warmup_frames = 15
+            self.face_warmup_stability_threshold = 0.08
+            self.recognition_cooldown = 3.0
             
             # Still try to update attendance manager
             self.update_attendance_manager_settings()
@@ -751,6 +759,9 @@ class SimpleKioskApp:
     
     def show_simple_manual_entry(self):
         """Show simple manual entry dialog for CLOCK mode"""
+        # Pause camera when popup appears
+        self.pause_camera_for_popup()
+        
         dialog = tk.Toplevel(self.root)
         dialog.title("Manual Entry")
         dialog.geometry("400x250")
@@ -779,6 +790,8 @@ class SimpleKioskApp:
         def submit():
             nric = entry.get().strip()
             dialog.destroy()
+            # Resume camera after popup closes
+            self.resume_camera_after_popup()
             if nric and nric.isdigit():
                 self.process_manual_entry(nric)
             elif nric:
@@ -788,6 +801,8 @@ class SimpleKioskApp:
 
         def cancel():
             dialog.destroy()
+            # Resume camera after popup closes
+            self.resume_camera_after_popup()
         
         # Buttons
         button_frame = tk.Frame(dialog)
@@ -1052,7 +1067,14 @@ class SimpleKioskApp:
     
     def handle_checkout_with_location_first_unified(self, nric, method):
         """Handle checkout by showing location selection first, then recording attendance for unified system"""
+        
+        # Pause camera to prevent continuous face recognition during location selection
+        self.pause_camera_for_popup()
+        
         def on_location_selected(location):
+            # Resume camera after location selection (always, whether location selected or cancelled)
+            self.resume_camera_after_popup()
+            
             if location:
                 # Check if this is an emergency clock-out
                 is_emergency = location.get('emergency_clockout', False)
@@ -1131,16 +1153,8 @@ class SimpleKioskApp:
                 else:
                     self.show_error_message("✗ Failed to record attendance")
             else:
-                # User cancelled location selection - still record checkout without location
-                current_time = self.attendance_manager.get_current_time()
-                record_id = self.db.record_attendance(nric, method, "out", "check", current_time)
-                
-                if record_id:
-                    employee = self.db.get_employee(nric)
-                    self.show_success_message(f"✓ {employee['name']} checked out")
-                    self.update_attendance_history()
-                else:
-                    self.show_error_message("✗ Failed to record attendance")
+                # User cancelled location selection - do NOT process checkout
+                print("[LOCATION DEBUG] User cancelled location selection - checkout cancelled")
         
         # Open location selector dialog
         from core.location_selector import LocationSelector
@@ -1152,7 +1166,13 @@ class SimpleKioskApp:
     
     def handle_checkout_location_selection(self, attendance_id, nric):
         """Handle location selection for check-out (legacy method for existing attendance records)"""
+        # Pause camera to prevent continuous face recognition during location selection
+        self.pause_camera_for_popup()
+        
         def on_location_selected(location):
+            # Resume camera after location selection (always, whether location selected or cancelled)
+            self.resume_camera_after_popup()
+            
             if location:
                 # Prepare location data for attendance record
                 location_data = {
@@ -1191,6 +1211,9 @@ class SimpleKioskApp:
     
     def show_employee_not_found_dialog(self, nric):
         """Show a dedicated error dialog for employee not found"""
+        # Pause camera when popup appears
+        self.pause_camera_for_popup()
+        
         dialog = tk.Toplevel(self.root)
         dialog.title("Employee Not Found")
         dialog.geometry("350x200")
@@ -1225,22 +1248,30 @@ class SimpleKioskApp:
         tk.Label(main_frame, text="Please check the ID and try again", 
                 font=("Arial", 10), bg='#ff4444', fg='white').pack(pady=5)
         
+        # Close function to resume camera
+        def close_dialog():
+            dialog.destroy()
+            self.resume_camera_after_popup()
+        
         # OK button
         ok_button = tk.Button(main_frame, text="OK", font=("Arial", 12, "bold"),
-                             command=dialog.destroy, width=10,
+                             command=close_dialog, width=10,
                              bg='white', fg='#ff4444', relief='raised', bd=2)
         ok_button.pack(pady=15)
         ok_button.focus_set()
         
         # Bind Enter and Escape keys
-        dialog.bind('<Return>', lambda e: dialog.destroy())
-        dialog.bind('<Escape>', lambda e: dialog.destroy())
+        dialog.bind('<Return>', lambda e: close_dialog())
+        dialog.bind('<Escape>', lambda e: close_dialog())
         
         # Auto-close after 5 seconds
-        dialog.after(5000, dialog.destroy)
+        dialog.after(5000, close_dialog)
     
     def show_already_checked_out_dialog(self, employee_name, nric):
         """Show error dialog for employee already checked out"""
+        # Pause camera when popup appears
+        self.pause_camera_for_popup()
+        
         dialog = tk.Toplevel(self.root)
         dialog.title("Already Checked Out")
         dialog.geometry("350x200")
@@ -1275,19 +1306,24 @@ class SimpleKioskApp:
         tk.Label(main_frame, text="Employee is already in checked out status", 
                 font=("Arial", 10), bg='#ff8800', fg='white').pack(pady=5)
         
+        # Close function to resume camera
+        def close_dialog():
+            dialog.destroy()
+            self.resume_camera_after_popup()
+        
         # OK button
         ok_button = tk.Button(main_frame, text="OK", font=("Arial", 12, "bold"),
-                             command=dialog.destroy, width=10,
+                             command=close_dialog, width=10,
                              bg='white', fg='#ff8800', relief='raised', bd=2)
         ok_button.pack(pady=15)
         ok_button.focus_set()
         
         # Bind Enter and Escape keys
-        dialog.bind('<Return>', lambda e: dialog.destroy())
-        dialog.bind('<Escape>', lambda e: dialog.destroy())
+        dialog.bind('<Return>', lambda e: close_dialog())
+        dialog.bind('<Escape>', lambda e: close_dialog())
         
         # Auto-close after 5 seconds
-        dialog.after(5000, dialog.destroy)
+        dialog.after(5000, close_dialog)
     
     def show_group_error_notification(self, employee_name, nric, error_type, additional_info=""):
         """Show detailed error notification for group check scenarios"""
@@ -1331,6 +1367,9 @@ class SimpleKioskApp:
         }
         
         config = error_configs.get(error_type, error_configs['not_clocked_in'])
+        
+        # Pause camera when popup appears
+        self.pause_camera_for_popup()
         
         dialog = tk.Toplevel(self.root)
         dialog.title(config['title'])
@@ -1376,19 +1415,24 @@ class SimpleKioskApp:
             tk.Label(main_frame, text=additional_info, 
                     font=("Arial", 10), bg=config['bg_color'], fg='white').pack(pady=5)
         
+        # Close function to resume camera
+        def close_dialog():
+            dialog.destroy()
+            self.resume_camera_after_popup()
+        
         # OK button
         ok_button = tk.Button(main_frame, text="OK", font=("Arial", 12, "bold"),
-                             command=dialog.destroy, width=10,
+                             command=close_dialog, width=10,
                              bg='white', fg=config['bg_color'], relief='raised', bd=2)
         ok_button.pack(pady=15)
         ok_button.focus_set()
         
         # Bind Enter and Escape keys
-        dialog.bind('<Return>', lambda e: dialog.destroy())
-        dialog.bind('<Escape>', lambda e: dialog.destroy())
+        dialog.bind('<Return>', lambda e: close_dialog())
+        dialog.bind('<Escape>', lambda e: close_dialog())
         
         # Auto-close after 5 seconds
-        dialog.after(5000, dialog.destroy)
+        dialog.after(5000, close_dialog)
     
 
     
@@ -1403,6 +1447,9 @@ class SimpleKioskApp:
                 pass
     
         """Show a temporary message dialog"""
+        # Pause camera when popup appears
+        self.pause_camera_for_popup()
+        
         dialog = tk.Toplevel(self.root)
         dialog.title("Information")
         dialog.geometry("350x180")
@@ -1433,21 +1480,26 @@ class SimpleKioskApp:
         tk.Label(main_frame, text=message, 
                 font=("Arial", 12, "bold"), bg=bg_color, fg='white').pack(pady=5)
         
+        # Close function to resume camera
+        def close_dialog():
+            dialog.destroy()
+            self.resume_camera_after_popup()
+        
         # OK button
         ok_button = tk.Button(main_frame, text="OK", font=("Arial", 12, "bold"),
-                             command=dialog.destroy, width=10,
+                             command=close_dialog, width=10,
                              bg='white', fg=bg_color, relief='raised', bd=2)
         ok_button.pack(pady=15)
         ok_button.focus_set()
         
         # Bind Enter and Escape keys
-        dialog.bind('<Return>', lambda e: dialog.destroy())
-        dialog.bind('<Escape>', lambda e: dialog.destroy())
+        dialog.bind('<Return>', lambda e: close_dialog())
+        dialog.bind('<Escape>', lambda e: close_dialog())
 
         dialog.focus_set()
         
         # Auto-close after 3 seconds
-        dialog.after(3000, dialog.destroy)
+        dialog.after(3000, close_dialog)
     
 
     
@@ -1642,6 +1694,68 @@ class SimpleKioskApp:
         
         # Auto-hide after timeout
         self.root.after(self.auto_timeout * 1000, self.clear_message)
+    
+    def show_auto_dismiss_error(self, message, dismiss_after=3):
+        """Show auto-dismissing error popup window for face recognition errors"""
+        # Pause camera when popup appears
+        self.pause_camera_for_popup()
+        
+        error_popup = ctk.CTkToplevel(self.root)
+        error_popup.title("Error")
+        error_popup.geometry("400x200")
+        error_popup.transient(self.root)
+        error_popup.attributes('-topmost', True)
+        
+        error_popup.overrideredirect(True)  # This removes title bar completely
+        
+        popup_width = 400
+        popup_height = 200
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - popup_width) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - popup_height) // 2
+        error_popup.geometry(f"{popup_width}x{popup_height}+{x}+{y}")
+        
+        # Error content
+        error_frame = ctk.CTkFrame(error_popup, fg_color="transparent")
+        error_frame.pack(expand=True, fill="both", padx=20, pady=20)
+        
+        # Error icon
+        icon_label = ctk.CTkLabel(
+            error_frame,
+            text="⚠️",
+            font=ctk.CTkFont(size=48)
+        )
+        icon_label.pack(pady=(10, 10))
+        
+        # Error message
+        message_label = ctk.CTkLabel(
+            error_frame,
+            text=message,
+            font=ctk.CTkFont(size=16),
+            text_color="red",
+            wraplength=350
+        )
+        message_label.pack(pady=10)
+        
+        # Countdown label
+        countdown_label = ctk.CTkLabel(
+            error_frame,
+            text=f"Closing in {dismiss_after} seconds...",
+            font=ctk.CTkFont(size=12),
+            text_color="gray"
+        )
+        countdown_label.pack(pady=(10, 0))
+        
+        # Auto-dismiss countdown
+        def countdown(remaining):
+            if remaining > 0:
+                countdown_label.configure(text=f"Closing in {remaining} seconds...")
+                error_popup.after(1000, lambda: countdown(remaining - 1))
+            else:
+                error_popup.destroy()
+                # Resume camera after popup closes
+                self.resume_camera_after_popup()
+        
+        countdown(dismiss_after)
     
     def play_scan_detected_beep(self):
         """Play quick beep when face or QR is detected (before processing)"""
@@ -2288,1084 +2402,57 @@ class SimpleKioskApp:
             print("[CAMERA DEBUG] Camera already active - this is unexpected in manual mode")
             self.show_success_message("📷 Camera is already active")
     
-    def export_daily_csv(self):
-        """Show enhanced date selection dialog for Excel export"""
-        self.show_export_date_selection_dialog()
-    
-    def show_export_date_selection_dialog(self):
-        """Show comprehensive date selection dialog for Excel export with calendar picker"""
-        from datetime import timedelta
-        from tkinter import messagebox
-        import calendar
+    def update_loop(self):
+        """Main update loop with comprehensive error handling"""
         try:
-            from tkcalendar import Calendar
-        except ImportError:
-            self.show_error_message("📅 tkcalendar module not found. Please install: pip install tkcalendar")
-            return
-        
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Excel Export - Calendar Date Selection")
-        dialog.geometry("800x950")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.resizable(False, False)
-        
-        # Center dialog on screen
-        dialog.update_idletasks()
-        x = (dialog.winfo_screenwidth() // 2) - (800 // 2)
-        y = (dialog.winfo_screenheight() // 2) - (950 // 2)
-        dialog.geometry(f"800x950+{x}+{y}")
-        
-        # Configure dialog background
-        dialog.configure(bg='#f0f8ff')
-        
-        # Main frame
-        main_frame = tk.Frame(dialog, bg='#f0f8ff')
-        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        # Title
-        title_label = tk.Label(
-            main_frame,
-            text="📊 ATTENDANCE EXPORT",
-            font=("Arial", 18, "bold"),
-            bg='#f0f8ff',
-            fg='#2E86C1'
-        )
-        title_label.pack(pady=10)
-        
-        # Export type selection
-        export_frame = tk.LabelFrame(main_frame, text="Export Options", font=("Arial", 12, "bold"),
-                                   bg='#f0f8ff', fg='#2E86C1', padx=10, pady=10)
-        export_frame.pack(fill="x", pady=10)
-        
-        # Variable to track export type
-        self.export_type = tk.StringVar(value="single_date")
-        
-        # Export type radio buttons
-        tk.Radiobutton(export_frame, text="Single Date", variable=self.export_type, value="single_date",
-                      font=("Arial", 11), bg='#f0f8ff', fg='black',
-                      command=self.update_date_controls).pack(anchor="w", pady=2)
-        
-        tk.Radiobutton(export_frame, text="Date Range", variable=self.export_type, value="date_range",
-                      font=("Arial", 11), bg='#f0f8ff', fg='black',
-                      command=self.update_date_controls).pack(anchor="w", pady=2)
-        
-        tk.Radiobutton(export_frame, text="Whole Month", variable=self.export_type, value="whole_month",
-                      font=("Arial", 11), bg='#f0f8ff', fg='black',
-                      command=self.update_date_controls).pack(anchor="w", pady=2)
-        
-        tk.Radiobutton(export_frame, text="Whole Year", variable=self.export_type, value="whole_year",
-                      font=("Arial", 11), bg='#f0f8ff', fg='black',
-                      command=self.update_date_controls).pack(anchor="w", pady=2)
-        
-        # Date selection frame
-        self.date_selection_frame = tk.LabelFrame(main_frame, text="Date Selection", 
-                                                 font=("Arial", 12, "bold"),
-                                                 bg='#f0f8ff', fg='#2E86C1', padx=10, pady=10)
-        self.date_selection_frame.pack(fill="x", pady=10)
-        
-        # Initialize date variables
-        today = datetime.now()
-        self.start_year = tk.StringVar(value=str(today.year))
-        self.start_month = tk.StringVar(value=str(today.month))
-        self.start_day = tk.StringVar(value=str(today.day))
-        self.end_year = tk.StringVar(value=str(today.year))
-        self.end_month = tk.StringVar(value=str(today.month))
-        self.end_day = tk.StringVar(value=str(today.day))
-        
-        # Create date controls (will be updated based on selection)
-        self.create_date_controls()
-        
-        # Preview frame
-        preview_frame = tk.LabelFrame(main_frame, text="Export Preview", 
-                                    font=("Arial", 12, "bold"),
-                                    bg='#f0f8ff', fg='#2E86C1', padx=10, pady=10)
-        preview_frame.pack(fill="x", pady=10)
-        
-        self.preview_label = tk.Label(preview_frame, text="📊 Real-time preview will appear here",
-                                    font=("Arial", 10), bg='#f0f8ff', fg='gray')
-        self.preview_label.pack(pady=10)
-        
-        # Action buttons
-        button_frame = tk.Frame(main_frame, bg='#f0f8ff')
-        button_frame.pack(fill="x", pady=20)
-        
-        export_btn = tk.Button(button_frame, text="Export", 
-                              font=("Arial", 12, "bold"),
-                              command=self.execute_date_based_export,
-                              bg='#2E86C1', fg='white', relief='raised', bd=2,
-                              width=10)
-        export_btn.pack(side="left", padx=10)
-        
-        cancel_btn = tk.Button(button_frame, text="Cancel", 
-                              font=("Arial", 12),
-                              command=dialog.destroy,
-                              bg='#ff6b6b', fg='white', relief='raised', bd=2,
-                              width=10)
-        cancel_btn.pack(side="right", padx=10)
-        
-        # Bind keyboard shortcuts
-        dialog.bind('<Return>', lambda e: self.execute_date_based_export())
-        dialog.bind('<Escape>', lambda e: dialog.destroy())
-        dialog.focus_set()
-        
-        # Store dialog reference
-        self.export_dialog = dialog
-        
-        # Initial update
-        self.update_date_controls()
-        
-    def create_date_controls(self):
-        """Create date input controls with calendar widgets and simplified selectors"""
-        from tkcalendar import Calendar
-        from tkinter import ttk
-        import calendar
-        
-        # Clear existing controls
-        for widget in self.date_selection_frame.winfo_children():
-            widget.destroy()
-        
-        export_type = self.export_type.get()
-        today = datetime.now()
-        
-        if export_type == "single_date":
-            # Single date selection with calendar
-            date_frame = tk.Frame(self.date_selection_frame, bg='#f0f8ff')
-            date_frame.pack(pady=10)
+            # Update time
+            current_time = datetime.now().strftime("%A, %B %d, %Y - %H:%M:%S")
+            self.time_label.configure(text=current_time)
             
-            tk.Label(date_frame, text="📅 Select Date:", font=("Arial", 11, "bold"),
-                    bg='#f0f8ff', fg='#2E86C1').pack(pady=5)
+            # Update attendance history every 30 seconds
+            current_timestamp = time.time()
+            if current_timestamp - self.last_history_update > 30:
+                self.update_attendance_history()
+                self.last_history_update = current_timestamp
             
-            # Calendar widget for single date
-            self.start_calendar = Calendar(
-                date_frame,
-                selectmode='day',
-                year=today.year,
-                month=today.month,
-                day=today.day,
-                background='white',
-                foreground='black',
-                bordercolor='#2E86C1',
-                headersbackground='#2E86C1',
-                headersforeground='white',
-                selectbackground='#87CEEB',
-                selectforeground='black',
-                weekendbackground='#f0f8ff',
-                weekendforeground='black',
-                othermonthforeground='gray',
-                othermonthbackground='#f5f5f5',
-                font=('Arial', 10)
-            )
-            self.start_calendar.pack(pady=10)
+            # Check focus every 10 seconds to maintain keyboard control
+            if not hasattr(self, 'last_focus_check'):
+                self.last_focus_check = 0
+            if current_timestamp - self.last_focus_check > 10:
+                self.maintain_focus()
+                self.last_focus_check = current_timestamp
             
-            # Bind calendar selection for real-time updates
-            self.start_calendar.bind("<<CalendarSelected>>", lambda e: self.update_export_preview())
-            
-            # Today button
-            today_btn = tk.Button(date_frame, text="📅 Today", font=("Arial", 10, "bold"),
-                                 command=self.set_today_calendar, bg='#87CEEB', fg='black',
-                                 relief='raised', bd=2)
-            today_btn.pack(pady=5)
-            
-        elif export_type == "date_range":
-            # Date range selection with two calendars
-            range_frame = tk.Frame(self.date_selection_frame, bg='#f0f8ff')
-            range_frame.pack(pady=10)
-            
-            # Create a notebook-style layout for two calendars
-            calendar_container = tk.Frame(range_frame, bg='#f0f8ff')
-            calendar_container.pack(pady=5)
-            
-            # Start date calendar
-            start_cal_frame = tk.LabelFrame(calendar_container, text="📅 From Date", 
-                                          font=("Arial", 10, "bold"), bg='#f0f8ff', fg='#2E86C1')
-            start_cal_frame.pack(side='left', padx=10, pady=5)
-            
-            self.start_calendar = Calendar(
-                start_cal_frame,
-                selectmode='day',
-                year=today.year,
-                month=today.month,
-                day=1,  # Start of month
-                background='white',
-                foreground='black',
-                bordercolor='#2E86C1',
-                headersbackground='#2E86C1',
-                headersforeground='white',
-                selectbackground='#87CEEB',
-                selectforeground='black',
-                font=('Arial', 9)
-            )
-            self.start_calendar.pack(pady=5)
-            
-            # Bind for real-time updates
-            self.start_calendar.bind("<<CalendarSelected>>", lambda e: self.update_export_preview())
-            
-            # End date calendar
-            end_cal_frame = tk.LabelFrame(calendar_container, text="📅 To Date",
-                                        font=("Arial", 10, "bold"), bg='#f0f8ff', fg='#2E86C1')
-            end_cal_frame.pack(side='right', padx=10, pady=5)
-            
-            self.end_calendar = Calendar(
-                end_cal_frame,
-                selectmode='day',
-                year=today.year,
-                month=today.month,
-                day=today.day,
-                background='white',
-                foreground='black',
-                bordercolor='#2E86C1',
-                headersbackground='#2E86C1',
-                headersforeground='white',
-                selectbackground='#87CEEB',
-                selectforeground='black',
-                font=('Arial', 9)
-            )
-            self.end_calendar.pack(pady=5)
-            
-            # Bind for real-time updates
-            self.end_calendar.bind("<<CalendarSelected>>", lambda e: self.update_export_preview())
-            
-            # Quick range buttons
-            quick_frame = tk.Frame(range_frame, bg='#f0f8ff')
-            quick_frame.pack(pady=10)
-            
-            tk.Button(quick_frame, text="📅 Last 7 Days", command=lambda: self.set_quick_range_calendar(7),
-                     bg='#87CEEB', fg='black', font=("Arial", 9, "bold"), relief='raised', bd=2).pack(side="left", padx=5)
-            tk.Button(quick_frame, text="📅 Last 30 Days", command=lambda: self.set_quick_range_calendar(30),
-                     bg='#87CEEB', fg='black', font=("Arial", 9, "bold"), relief='raised', bd=2).pack(side="left", padx=5)
-            tk.Button(quick_frame, text="📅 This Month", command=self.set_current_month_calendar,
-                     bg='#87CEEB', fg='black', font=("Arial", 9, "bold"), relief='raised', bd=2).pack(side="left", padx=5)
-            
-        elif export_type == "whole_month":
-            # Simplified month and year selection with dropdowns
-            month_frame = tk.Frame(self.date_selection_frame, bg='#f0f8ff')
-            month_frame.pack(pady=10)
-            
-            tk.Label(month_frame, text="🗓️ Select Month and Year:", font=("Arial", 11, "bold"),
-                    bg='#f0f8ff', fg='#2E86C1').pack(pady=5)
-            
-            # Month and Year dropdowns
-            selector_frame = tk.Frame(month_frame, bg='#f0f8ff')
-            selector_frame.pack(pady=10)
-            
-            # Month selection
-            tk.Label(selector_frame, text="Month:", font=("Arial", 10, "bold"),
-                    bg='#f0f8ff', fg='#2E86C1').grid(row=0, column=0, padx=5, pady=5, sticky='e')
-            
-            months = [calendar.month_name[i] for i in range(1, 13)]
-            self.month_var = tk.StringVar(value=calendar.month_name[today.month])
-            month_combo = ttk.Combobox(selector_frame, textvariable=self.month_var, values=months,
-                                     state='readonly', font=("Arial", 10), width=12)
-            month_combo.grid(row=0, column=1, padx=5, pady=5)
-            month_combo.bind('<<ComboboxSelected>>', lambda e: self.update_export_preview())
-            
-            # Year selection
-            tk.Label(selector_frame, text="Year:", font=("Arial", 10, "bold"),
-                    bg='#f0f8ff', fg='#2E86C1').grid(row=0, column=2, padx=5, pady=5, sticky='e')
-            
-            current_year = today.year
-            years = [str(year) for year in range(1900, 2101)]
-            self.year_var = tk.StringVar(value=str(today.year))
-            year_combo = ttk.Combobox(selector_frame, textvariable=self.year_var, values=years,
-                                    state='readonly', font=("Arial", 10), width=8, height=10)
-            year_combo.grid(row=0, column=3, padx=5, pady=5)
-            year_combo.bind('<<ComboboxSelected>>', lambda e: self.update_export_preview())
-            
-            # Quick month buttons
-            quick_month_frame = tk.Frame(month_frame, bg='#f0f8ff')
-            quick_month_frame.pack(pady=10)
-            
-            tk.Button(quick_month_frame, text="📅 This Month", command=self.set_current_month,
-                     bg='#87CEEB', fg='black', font=("Arial", 9, "bold"), relief='raised', bd=2).pack(side="left", padx=5)
-            tk.Button(quick_month_frame, text="📅 Last Month", command=self.set_last_month,
-                     bg='#87CEEB', fg='black', font=("Arial", 9, "bold"), relief='raised', bd=2).pack(side="left", padx=5)
-            
-        elif export_type == "whole_year":
-            # Simplified year selection with dropdown
-            year_frame = tk.Frame(self.date_selection_frame, bg='#f0f8ff')
-            year_frame.pack(pady=10)
-            
-            tk.Label(year_frame, text="📋 Select Year:", font=("Arial", 11, "bold"),
-                    bg='#f0f8ff', fg='#2E86C1').pack(pady=5)
-            
-            # Year dropdown
-            selector_frame = tk.Frame(year_frame, bg='#f0f8ff')
-            selector_frame.pack(pady=10)
-            
-            current_year = today.year
-            years = [str(year) for year in range(1900, 2101)]
-            self.year_var = tk.StringVar(value=str(today.year))
-            year_combo = ttk.Combobox(selector_frame, textvariable=self.year_var, values=years,
-                                    state='readonly', font=("Arial", 12), width=15, height=10)
-            year_combo.pack(pady=10)
-            year_combo.bind('<<ComboboxSelected>>', lambda e: self.update_export_preview())
-            
-            # Quick year buttons
-            quick_year_frame = tk.Frame(year_frame, bg='#f0f8ff')
-            quick_year_frame.pack(pady=10)
-            
-            tk.Button(quick_year_frame, text="📅 This Year", command=self.set_current_year,
-                     bg='#87CEEB', fg='black', font=("Arial", 9, "bold"), relief='raised', bd=2).pack(side="left", padx=5)
-            tk.Button(quick_year_frame, text="📅 Last Year", command=self.set_last_year,
-                     bg='#87CEEB', fg='black', font=("Arial", 9, "bold"), relief='raised', bd=2).pack(side="left", padx=5)
-    
-    def update_date_controls(self):
-        """Update date controls based on export type selection"""
-        self.create_date_controls()
-        self.update_export_preview()
-    
-    def set_today_calendar(self):
-        """Set calendar to today's date"""
-        today = datetime.now()
-        if hasattr(self, 'start_calendar'):
-            self.start_calendar.selection_set(today.date())
-        self.update_export_preview()
-    
-    def set_quick_range_calendar(self, days):
-        """Set quick date range on calendars"""
-        from datetime import timedelta
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days)
-        
-        if hasattr(self, 'start_calendar'):
-            self.start_calendar.selection_set(start_date.date())
-        if hasattr(self, 'end_calendar'):
-            self.end_calendar.selection_set(end_date.date())
-        self.update_export_preview()
-    
-    def set_current_month_calendar(self):
-        """Set calendars to current month range"""
-        from datetime import timedelta
-        today = datetime.now()
-        start_date = datetime(today.year, today.month, 1)
-        # Get last day of month
-        if today.month == 12:
-            end_date = datetime(today.year + 1, 1, 1) - timedelta(days=1)
-        else:
-            end_date = datetime(today.year, today.month + 1, 1) - timedelta(days=1)
-        
-        if hasattr(self, 'start_calendar'):
-            self.start_calendar.selection_set(start_date.date())
-        if hasattr(self, 'end_calendar'):
-            self.end_calendar.selection_set(end_date.date())
-        self.update_export_preview()
-    
-    def set_current_month(self):
-        """Set month/year selectors to current month"""
-        import calendar
-        today = datetime.now()
-        if hasattr(self, 'month_var'):
-            self.month_var.set(calendar.month_name[today.month])
-        if hasattr(self, 'year_var'):
-            self.year_var.set(str(today.year))
-        self.update_export_preview()
-    
-    def set_last_month(self):
-        """Set month/year selectors to last month"""
-        import calendar
-        from datetime import timedelta
-        last_month_date = datetime.now().replace(day=1) - timedelta(days=1)
-        if hasattr(self, 'month_var'):
-            self.month_var.set(calendar.month_name[last_month_date.month])
-        if hasattr(self, 'year_var'):
-            self.year_var.set(str(last_month_date.year))
-        self.update_export_preview()
-    
-    def set_current_year(self):
-        """Set year selector to current year"""
-        today = datetime.now()
-        if hasattr(self, 'year_var'):
-            self.year_var.set(str(today.year))
-        self.update_export_preview()
-    
-    def set_last_year(self):
-        """Set year selector to last year"""
-        today = datetime.now()
-        if hasattr(self, 'year_var'):
-            self.year_var.set(str(today.year - 1))
-        self.update_export_preview()
-    
-    def update_export_preview(self):
-        """Update the export preview"""
-        try:
-            export_type = self.export_type.get()
-            
-            if export_type == "single_date":
-                if hasattr(self, 'start_calendar'):
-                    selected_date = self.start_calendar.selection_get()
-                    date_str = selected_date.strftime("%Y-%m-%d")
-                    preview_text = f"📅 Export Date: {date_str}"
-                else:
-                    preview_text = "📅 Select a date from the calendar"
-                
-            elif export_type == "date_range":
-                if hasattr(self, 'start_calendar') and hasattr(self, 'end_calendar'):
-                    start_date = self.start_calendar.selection_get()
-                    end_date = self.end_calendar.selection_get()
-                    start_str = start_date.strftime("%Y-%m-%d")
-                    end_str = end_date.strftime("%Y-%m-%d")
-                    preview_text = f"📆 Date Range: {start_str} to {end_str}"
-                else:
-                    preview_text = "📆 Select start and end dates from calendars"
-                
-            elif export_type == "whole_month":
-                if hasattr(self, 'month_var') and hasattr(self, 'year_var'):
-                    month_name = self.month_var.get()
-                    year = self.year_var.get()
-                    preview_text = f"🗓️ Whole Month: {month_name} {year}"
-                else:
-                    preview_text = "🗓️ Select month and year from dropdowns"
-                
-            elif export_type == "whole_year":
-                if hasattr(self, 'year_var'):
-                    year = self.year_var.get()
-                    preview_text = f"📋 Whole Year: {year}"
-                else:
-                    preview_text = "📋 Select year from dropdown"
-            
-            # Get estimated record count
-            record_count = self.get_estimated_record_count()
-            preview_text += f"\n📊 Estimated Records: {record_count}"
-            
-            self.preview_label.configure(text=preview_text, fg='black')
+            # Process camera with error handling
+            if self.camera_active:
+                try:
+                    self.process_camera()
+                except Exception as cam_e:
+                    print(f"[UPDATE ERROR] Camera processing failed: {cam_e}")
+                    # Force garbage collection on camera errors
+                    import gc
+                    collected = gc.collect()
+                    print(f"[GC ERROR] Collected {collected} objects after camera error")
             
         except Exception as e:
-            self.preview_label.configure(text=f"⚠️ Preview Error: {str(e)}", fg='red')
-    
-    def get_estimated_record_count(self):
-        """Get estimated record count for the selected date range"""
-        try:
-            export_type = self.export_type.get()
-            
-            if export_type == "single_date":
-                if hasattr(self, 'start_calendar'):
-                    selected_date = self.start_calendar.selection_get()
-                    date_str = selected_date.strftime("%Y-%m-%d")
-                    records = self.db.get_attendance_by_date_range(date_str, date_str)
-                else:
-                    return 0
-                
-            elif export_type == "date_range":
-                if hasattr(self, 'start_calendar') and hasattr(self, 'end_calendar'):
-                    start_date = self.start_calendar.selection_get().strftime("%Y-%m-%d")
-                    end_date = self.end_calendar.selection_get().strftime("%Y-%m-%d")
-                    records = self.db.get_attendance_by_date_range(start_date, end_date)
-                else:
-                    return 0
-                
-            elif export_type == "whole_month":
-                if hasattr(self, 'month_var') and hasattr(self, 'year_var'):
-                    import calendar
-                    month_name = self.month_var.get()
-                    year = int(self.year_var.get())
-                    
-                    # Convert month name to number
-                    month_num = list(calendar.month_name).index(month_name)
-                    
-                    # Get first and last day of month
-                    start_date = f"{year}-{month_num:02d}-01"
-                    if month_num == 12:
-                        end_date = f"{year + 1}-01-01"
-                        end_date = datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=1)
-                        end_date = end_date.strftime("%Y-%m-%d")
-                    else:
-                        end_date = f"{year}-{month_num + 1:02d}-01"
-                        end_date = datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=1)
-                        end_date = end_date.strftime("%Y-%m-%d")
-                    
-                    records = self.db.get_attendance_by_date_range(start_date, end_date)
-                else:
-                    return 0
-                
-            elif export_type == "whole_year":
-                if hasattr(self, 'year_var'):
-                    year = int(self.year_var.get())
-                    start_date = f"{year}-01-01"
-                    end_date = f"{year}-12-31"
-                    records = self.db.get_attendance_by_date_range(start_date, end_date)
-                else:
-                    return 0
-            
-            return len(records) if records else 0
-            
-        except Exception as e:
-            print(f"[EXPORT DEBUG] Error getting record count: {e}")
-            return "Unknown"
-    
-    def execute_date_based_export(self):
-        """Execute the export based on selected date criteria"""
-        from tkinter import messagebox
-        try:
-            export_type = self.export_type.get()
-            
-            # Get the date range based on calendar selection
-            if export_type == "single_date":
-                if hasattr(self, 'start_calendar'):
-                    selected_date = self.start_calendar.selection_get()
-                    start_date = selected_date.strftime("%Y-%m-%d")
-                    end_date = start_date
-                    export_title = f"Single Day - {start_date}"
-                else:
-                    messagebox.showerror("Selection Error", "Please select a date from the calendar")
-                    return
-                
-            elif export_type == "date_range":
-                if hasattr(self, 'start_calendar') and hasattr(self, 'end_calendar'):
-                    start_selected = self.start_calendar.selection_get()
-                    end_selected = self.end_calendar.selection_get()
-                    start_date = start_selected.strftime("%Y-%m-%d")
-                    end_date = end_selected.strftime("%Y-%m-%d")
-                    
-                    # Ensure start date is before or equal to end date
-                    if start_selected > end_selected:
-                        messagebox.showerror("Date Error", "Start date must be before or equal to end date")
-                        return
-                        
-                    export_title = f"Date Range - {start_date} to {end_date}"
-                else:
-                    messagebox.showerror("Selection Error", "Please select both start and end dates from the calendars")
-                    return
-                
-            elif export_type == "whole_month":
-                if hasattr(self, 'month_var') and hasattr(self, 'year_var'):
-                    import calendar
-                    month_name = self.month_var.get()
-                    year = int(self.year_var.get())
-                    
-                    # Convert month name to number
-                    month_num = list(calendar.month_name).index(month_name)
-                    
-                    start_date = f"{year}-{month_num:02d}-01"
-                    if month_num == 12:
-                        end_date = f"{year + 1}-01-01"
-                        end_date = datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=1)
-                        end_date = end_date.strftime("%Y-%m-%d")
-                    else:
-                        end_date = f"{year}-{month_num + 1:02d}-01"
-                        end_date = datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=1)
-                        end_date = end_date.strftime("%Y-%m-%d")
-                    
-                    export_title = f"Whole Month - {month_name} {year}"
-                else:
-                    messagebox.showerror("Selection Error", "Please select month and year from the dropdowns")
-                    return
-                
-            elif export_type == "whole_year":
-                if hasattr(self, 'year_var'):
-                    year = int(self.year_var.get())
-                    start_date = f"{year}-01-01"
-                    end_date = f"{year}-12-31"
-                    export_title = f"Whole Year - {year}"
-                else:
-                    messagebox.showerror("Selection Error", "Please select year from the dropdown")
-                    return
-            
-            # Close the dialog first
-            self.export_dialog.destroy()
-            
-            # Execute the export
-            self.perform_date_range_export(start_date, end_date, export_title)
-            
-        except Exception as e:
-            messagebox.showerror("Export Error", f"Error preparing export: {str(e)}")
-    
-    def perform_date_range_export(self, start_date, end_date, export_title):
-        """Perform Excel export for the specified date range"""
-        try:
-            # Get attendance records for the date range
-            records = self.db.get_attendance_by_date_range(start_date, end_date)
-            
-            if not records:
-                self.show_error_message(f"📊 No attendance records found for {export_title}")
-                return
-            
-            print(f"[EXCEL EXPORT] Found {len(records)} records for {export_title}")
-            
-            # Create exports directory if it doesn't exist
-            exports_dir = "exports"
-            if not os.path.exists(exports_dir):
-                os.makedirs(exports_dir)
-                
-            # Generate filename with timestamp and date range
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safe_title = export_title.replace(" ", "_").replace("-", "_").replace("/", "_")
-            filename = f"{exports_dir}/attendance_{safe_title}_{timestamp}.xlsx"
-            
-            # Create Excel workbook and worksheet
-            wb = Workbook()
-            ws = wb.active
-            ws.title = f"Attendance Export"
-            
-            # Define styles
-            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-            
-            # Header style
-            header_font = Font(bold=True, color="FFFFFF")
-            header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
-            header_alignment = Alignment(horizontal="center", vertical="center")
-            
-            # Late clock-in style (red background)
-            late_fill = PatternFill(start_color="FFCCCB", end_color="FFCCCB", fill_type="solid")
-            late_font = Font(color="CC0000", bold=True)
-            
-            # On-time clock-in/clock-out style (green background)
-            ontime_fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")
-            ontime_font = Font(color="006600", bold=True)
-            
-            # Regular style
-            regular_alignment = Alignment(horizontal="left", vertical="center")
-            border = Border(
-                left=Side(style='thin'),
-                right=Side(style='thin'),
-                top=Side(style='thin'),
-                bottom=Side(style='thin')
-            )
-            
-            # Excel Headers
-            headers = [
-                'Employee ID', 'Employee Name', 'Role', 'Date', 'Time', 'Status', 
-                'Method', 'Attendance Type', 'Location Name', 'Address', 'Late Status'
-            ]
-            
-            # Write headers
-            for col, header in enumerate(headers, 1):
-                cell = ws.cell(row=1, column=col, value=header)
-                cell.font = header_font
-                cell.fill = header_fill
-                cell.alignment = header_alignment
-                cell.border = border
-            
-            # Sort records by date, employee name, then by timestamp
-            sorted_records = sorted(records, key=lambda x: (x['timestamp'][:10], x['name'], x['timestamp']))
-            
-            # Write data rows
-            late_count = 0
-            ontime_clockin_count = 0
-            clockout_count = 0
-            current_row = 2  # Start from row 2 (after header)
-            previous_date = None
-            
-            for i, record in enumerate(sorted_records):
-                # Parse timestamp
-                record_datetime = datetime.strptime(record['timestamp'], "%Y-%m-%d %H:%M:%S")
-                date_part = record_datetime.strftime("%Y-%m-%d")
-                time_part = record_datetime.strftime("%H:%M:%S")
-                
-                # Check if this is a new date (different from previous record)
-                if previous_date is not None and date_part != previous_date:
-                    # Insert a blank row between different days
-                    current_row += 1
-                    # Add a subtle background color to the separator row for visual clarity
-                    separator_fill = PatternFill(start_color="F5F5F5", end_color="F5F5F5", fill_type="solid")
-                    for col in range(1, len(headers) + 1):
-                        separator_cell = ws.cell(row=current_row, column=col, value="")
-                        separator_cell.fill = separator_fill
-                
-                # Add date header for the first record of each day
-                if previous_date != date_part:
-                    current_row += 1
-                    # Create a date header row
-                    date_header_fill = PatternFill(start_color="E8F4FD", end_color="E8F4FD", fill_type="solid")
-                    date_header_font = Font(bold=True, color="2E86C1")
-                    date_header_alignment = Alignment(horizontal="center", vertical="center")
-                    
-                    # Merge cells for date header
-                    date_cell = ws.cell(row=current_row, column=1, value=f"📅 {date_part}")
-                    date_cell.fill = date_header_fill
-                    date_cell.font = date_header_font
-                    date_cell.alignment = date_header_alignment
-                    date_cell.border = border
-                    
-                    # Fill the rest of the merged row
-                    for col in range(2, len(headers) + 1):
-                        merge_cell = ws.cell(row=current_row, column=col, value="")
-                        merge_cell.fill = date_header_fill
-                        merge_cell.border = border
-                    
-                    # Merge the date header across all columns
-                    ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=len(headers))
-                
-                # Update current row for actual data
-                current_row += 1
-                previous_date = date_part
-                
-                # Format status and attendance type
-                attendance_type = record.get('attendance_type', 'check').upper()
-                status_text = "IN" if record['status'] == 'in' else "OUT"
-                
-                # Format method
-                method_map = {
-                    'face_recognition': 'Face Recognition',
-                    'qr_code': 'QR/Barcode Scan',
-                    'manual': 'Manual Entry'
-                }
-                method = method_map.get(record['method'], record['method'])
-                
-                # Get location data (only for CHECK OUT records)
-                location_name = record.get('location_name', '') if record['status'] == 'out' else ''
-                address = record.get('address', '') if record['status'] == 'out' else ''
-                
-                # Check if this is a late record
-                is_late = record.get('late', False)
-                late_status = 'LATE' if is_late else 'ON-TIME'
-                
-                # Get employee role
-                employee_data = self.db.get_employee(record['nric'])
-                employee_role = employee_data.get('role', 'Staff') if employee_data else 'Staff'
-                role_display = f"🛡️ {employee_role}" if employee_role == 'Security' else f"👥 {employee_role}"
-                
-                # Write row data
-                row_data = [
-                    record['nric'],
-                    record['name'],
-                    role_display,
-                    date_part,
-                    time_part,
-                    status_text,
-                    method,
-                    attendance_type,
-                    location_name,
-                    address,
-                    late_status
-                ]
-                
-                for col, value in enumerate(row_data, 1):
-                    cell = ws.cell(row=current_row, column=col, value=value)
-                    cell.alignment = regular_alignment
-                    cell.border = border
-                    
-                    # Highlight clock records based on status and late flag
-                    if attendance_type == 'CLOCK':
-                        if record['status'] == 'in':
-                            if is_late:
-                                # Late clock-in - red highlighting
-                                cell.fill = late_fill
-                                if col == 11:  # Late Status column (shifted by 1 due to Role column)
-                                    cell.font = late_font
-                                late_count += 1
-                            else:
-                                # On-time clock-in - green highlighting
-                                cell.fill = ontime_fill
-                                if col == 11:  # Late Status column (shifted by 1 due to Role column)
-                                    cell.font = ontime_font
-                                ontime_clockin_count += 1
-                        elif record['status'] == 'out':
-                            # Clock-out - green highlighting (always on time due to restrictions)
-                            cell.fill = ontime_fill
-                            clockout_count += 1
-            
-            # Auto-adjust column widths
-            for column in ws.columns:
-                max_length = 0
-                column_letter = column[0].column_letter
-                for cell in column:
-                    try:
-                        if len(str(cell.value)) > max_length:
-                            max_length = len(str(cell.value))
-                    except:
-                        pass
-                adjusted_width = min(max_length + 2, 50)  # Cap at 50 characters
-                ws.column_dimensions[column_letter].width = adjusted_width
-            
-            # Save workbook
-            wb.save(filename)
-            
-            # Show success message with file location and statistics
-            success_msg = f"📊 Exported {len(records)} records\n📅 {export_title}\n💾 Saved to: {filename}"
-            
-            if late_count > 0:
-                success_msg += f"\n🔴 {late_count} late clock-ins highlighted"
-            if ontime_clockin_count > 0:
-                success_msg += f"\n🟢 {ontime_clockin_count} on-time clock-ins highlighted"
-            if clockout_count > 0:
-                success_msg += f"\n🟢 {clockout_count} clock-outs highlighted"
-            
-            self.show_success_message(success_msg)
-            print(f"[EXCEL EXPORT] Successfully exported to: {filename}")
-            print(f"[EXCEL EXPORT] Date range: {start_date} to {end_date}")
-            if late_count > 0:
-                print(f"[EXCEL EXPORT] {late_count} late clock-ins highlighted in red")
-            if ontime_clockin_count > 0:
-                print(f"[EXCEL EXPORT] {ontime_clockin_count} on-time clock-ins highlighted in green")
-            if clockout_count > 0:
-                print(f"[EXCEL EXPORT] {clockout_count} clock-outs highlighted in green")
-            
-        except Exception as e:
-            print(f"[EXCEL EXPORT] Error exporting Excel: {e}")
-            self.show_error_message(f"📊 Excel export failed: {str(e)}")
-    
-    def show_excel_export_confirmation(self, date, record_count):
-        """Show confirmation dialog for Excel export"""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Excel Export Confirmation")
-        dialog.geometry("450x350")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.resizable(False, False)
+            print(f"[UPDATE ERROR] Exception in main update loop: {e}")
+            import traceback
+            traceback.print_exc()
+            # Force garbage collection on any update error
+            import gc
+            collected = gc.collect()
+            print(f"[GC ERROR] Collected {collected} objects after update error")
         
-        # Center dialog on screen
-        dialog.update_idletasks()
-        x = (dialog.winfo_screenwidth() // 2) - (450 // 2)
-        y = (dialog.winfo_screenheight() // 2) - (350 // 2)
-        dialog.geometry(f"450x350+{x}+{y}")
-        
-        # Configure dialog background
-        dialog.configure(bg='#2E86C1')
-        
-        # Main frame
-        main_frame = tk.Frame(dialog, bg='#2E86C1')
-        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        # Export icon
-        tk.Label(main_frame, text="�", font=("Arial", 32), 
-                bg='#2E86C1', fg='white').pack(pady=10)
-        
-        # Confirmation message
-        tk.Label(main_frame, text="Export", 
-                font=("Arial", 14, "bold"), bg='#2E86C1', fg='white').pack()
-        
-        tk.Label(main_frame, text=f"Date: {date}", 
-                font=("Arial", 12), bg='#2E86C1', fg='white').pack(pady=5)
-        
-        tk.Label(main_frame, text=f"Records: {record_count}", 
-                font=("Arial", 12), bg='#2E86C1', fg='white').pack(pady=2)
-        
-        tk.Label(main_frame, text="• Late clock-ins highlighted in red", 
-                font=("Arial", 10), bg='#2E86C1', fg='lightblue').pack(pady=2)
-        
-        tk.Label(main_frame, text="• Professional Excel formatting", 
-                font=("Arial", 10), bg='#2E86C1', fg='lightblue').pack(pady=2)
-        
-        tk.Label(main_frame, text="Proceed with Excel export?", 
-                font=("Arial", 11, "bold"), bg='#2E86C1', fg='white').pack(pady=15)
-        
-        # Bind keys for confirmation
-        def confirm_export():
-            dialog.destroy()
-            self.perform_excel_export()
-            
-        def cancel_export():
-            dialog.destroy()
-            self.show_success_message("Excel export cancelled")
-        
-        dialog.bind('<Return>', lambda e: confirm_export())       # Enter key
-        dialog.bind('<KP_Enter>', lambda e: confirm_export())     # Numpad Enter
-        dialog.bind('<KP_Multiply>', lambda e: confirm_export())  # Numpad *
-        dialog.bind('<asterisk>', lambda e: confirm_export())     # Regular *
-        dialog.bind('<KP_Subtract>', lambda e: cancel_export())   # Numpad -
-        dialog.bind('<minus>', lambda e: cancel_export())         # Regular -
-        dialog.bind('<Escape>', lambda e: cancel_export())        # Escape key
-        
-        dialog.focus_set()
-        
-        # Auto-cancel after 15 seconds
-        dialog.after(15000, lambda: dialog.destroy() if dialog.winfo_exists() else None)
-    
-    def perform_excel_export(self):
-        """Actually perform the Excel export with late highlighting"""
-        try:
-            # Get today's date
-            current_date = datetime.now().strftime("%Y-%m-%d")
-            
-            # Get today's attendance records
-            attendance_records = self.db.get_attendance_today()
-            
-            # Filter to ensure only today's records (extra safety)
-            today_records = []
-            for record in attendance_records:
-                record_date = record['timestamp'][:10]  # Extract YYYY-MM-DD part
-                if record_date == current_date:
-                    today_records.append(record)
-            
-            print(f"[EXCEL EXPORT] Found {len(today_records)} records for {current_date}")
-            
-            if not today_records:
-                self.show_error_message("No attendance records found for today")
-                return
-            
-            # Create exports directory if it doesn't exist
-            exports_dir = "exports"
-            if not os.path.exists(exports_dir):
-                os.makedirs(exports_dir)
-                
-            # Generate filename with timestamp
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{exports_dir}/attendance_{current_date}_{timestamp}.xlsx"
-            
-            # Create Excel workbook and worksheet
-            wb = Workbook()
-            ws = wb.active
-            ws.title = f"Attendance {current_date}"
-            
-            # Define styles
-            # Header style
-            header_font = Font(bold=True, color="FFFFFF")
-            header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
-            header_alignment = Alignment(horizontal="center", vertical="center")
-            
-            # Late clock-in style (red background)
-            late_fill = PatternFill(start_color="FFCCCB", end_color="FFCCCB", fill_type="solid")
-            late_font = Font(color="CC0000", bold=True)
-            
-            # On-time clock-in style (green background)
-            ontime_fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")
-            ontime_font = Font(color="006600", bold=True)
-
-            # On-time clock-out style (yellow background)
-            ontime_fill_clockout = PatternFill(start_color="FFE599", end_color="FFE599", fill_type="solid")
-            
-            # Regular style
-            regular_alignment = Alignment(horizontal="left", vertical="center")
-            border = Border(
-                left=Side(style='thin'),
-                right=Side(style='thin'),
-                top=Side(style='thin'),
-                bottom=Side(style='thin')
-            )
-            
-            # Excel Headers
-            headers = [
-                'Employee ID', 'Employee Name', 'Date', 'Time', 'Status', 
-                'Method', 'Attendance Type', 'Location Name', 'Address', 'Late Status'
-            ]
-            
-            # Write headers
-            for col, header in enumerate(headers, 1):
-                cell = ws.cell(row=1, column=col, value=header)
-                cell.font = header_font
-                cell.fill = header_fill
-                cell.alignment = header_alignment
-                cell.border = border
-            
-            # Sort records by employee name, then by timestamp ascending
-            sorted_records = sorted(today_records, key=lambda x: (x['name'], x['timestamp']))
-            
-            # Write data rows
-            late_count = 0
-            for row, record in enumerate(sorted_records, 2):  # Start from row 2 (after header)
-                # Parse timestamp
-                record_datetime = datetime.strptime(record['timestamp'], "%Y-%m-%d %H:%M:%S")
-                date_part = record_datetime.strftime("%Y-%m-%d")
-                time_part = record_datetime.strftime("%H:%M:%S")
-                
-                # Format status and attendance type
-                attendance_type = record.get('attendance_type', 'check').upper()
-                if attendance_type == 'CLOCK':
-                    status = "CLOCK IN" if record['status'] == 'in' else "CLOCK OUT"
-                else:  # CHECK
-                    status = "CHECK IN" if record['status'] == 'in' else "CHECK OUT"
-                
-                # Format method
-                method_map = {
-                    'face_recognition': 'Face Recognition',
-                    'qr_code': 'QR/Barcode Scan',
-                    'manual': 'Manual Entry'
-                }
-                method = method_map.get(record['method'], record['method'])
-                
-                # Get location data (only for CHECK OUT records)
-                location_name = record.get('location_name', '') if record['status'] == 'out' else ''
-                address = record.get('address', '') if record['status'] == 'out' else ''
-                
-                # Check if this is a late record
-                is_late = record.get('late', False)
-                late_status = 'LATE' if is_late else 'ON-TIME'
-                
-                row_data = [
-                    record['nric'],
-                    record['name'],
-                    date_part,
-                    time_part,
-                    status,
-                    method,
-                    attendance_type,
-                    location_name,
-                    address,
-                    late_status
-                ]
-                
-                for col, value in enumerate(row_data, 1):
-                    cell = ws.cell(row=row, column=col, value=value)
-                    cell.alignment = regular_alignment
-                    cell.border = border
-                    
-                    # Highlight clock records based on status and late flag
-                    if attendance_type == 'CLOCK':
-                        if record['status'] == 'in':
-                            if is_late:
-                                # Late clock-in - red highlighting
-                                cell.fill = late_fill
-                                if col == 10:  # Late Status column
-                                    cell.font = late_font
-                                late_count += 1
-                            else:
-                                # On-time clock-in - green highlighting
-                                cell.fill = ontime_fill
-                                if col == 10:  # Late Status column
-                                    cell.font = ontime_font
-                        elif record['status'] == 'out':
-                            # Clock-out - green highlighting (always on time due to restrictions)
-                            cell.fill = ontime_fill_clockout
-            
-            # Auto-adjust column widths
-            for column in ws.columns:
-                max_length = 0
-                column_letter = column[0].column_letter
-                for cell in column:
-                    try:
-                        if len(str(cell.value)) > max_length:
-                            max_length = len(str(cell.value))
-                    except:
-                        pass
-                adjusted_width = min(max_length + 2, 50)  # Cap at 50 characters
-                ws.column_dimensions[column_letter].width = adjusted_width
-            
-            # Save workbook
-            wb.save(filename)
-            
-            # Count actual late and on-time clock records for reporting
-            actual_late_count = sum(1 for r in today_records 
-                                   if r.get('late', False) and 
-                                      r.get('attendance_type') == 'clock' and 
-                                      r['status'] == 'in')
-            
-            # Count on-time clock-ins and all clock-outs (green highlighting)
-            actual_ontime_count = sum(1 for r in today_records 
-                                     if ((not r.get('late', False) and r['status'] == 'in') or r['status'] == 'out') and
-                                        r.get('attendance_type') == 'clock')
-            
-            # Count clock-outs separately for detailed reporting
-            clockout_count = sum(1 for r in today_records 
-                               if r.get('attendance_type') == 'clock' and r['status'] == 'out')
-            
-            # Show success message with file location
-            success_msg = f"Exported {len(today_records)} records\nSaved to: {filename}"
-            if actual_late_count > 0:
-                success_msg += f"\n🔴 {actual_late_count} late clock-ins highlighted"
-            # Count on-time clock-ins separately for clearer messaging
-            ontime_clockin_count = sum(1 for r in today_records 
-                                     if not r.get('late', False) and 
-                                        r.get('attendance_type') == 'clock' and 
-                                        r['status'] == 'in')
-            
-            if ontime_clockin_count > 0:
-                success_msg += f"\n🟢 {ontime_clockin_count} on-time clock-ins highlighted"
-            if clockout_count > 0:
-                success_msg += f"\n🟢 {clockout_count} clock-outs highlighted"
-            
-            self.show_success_message(success_msg)
-            print(f"[EXCEL EXPORT] Successfully exported to: {filename}")
-            if actual_late_count > 0:
-                print(f"[EXCEL EXPORT] {actual_late_count} late clock-ins highlighted in red")
-            if ontime_clockin_count > 0:
-                print(f"[EXCEL EXPORT] {ontime_clockin_count} on-time clock-ins highlighted in green")
-            if clockout_count > 0:
-                print(f"[EXCEL EXPORT] {clockout_count} clock-outs highlighted in green")
-            
-        except Exception as e:
-            print(f"[EXCEL EXPORT] Error exporting Excel: {e}")
-            self.show_error_message(f"Excel export failed: {str(e)}")
+        finally:
+            # Always schedule next update (16ms ≈ 60 FPS for smoother video)
+            try:
+                self.root.after(16, self.update_loop)
+            except Exception as e:
+                print(f"[SCHEDULE ERROR] Failed to schedule next update: {e}")
+                # Try with longer delay as fallback
+                try:
+                    self.root.after(50, self.update_loop)
+                except:
+                    print("[CRITICAL ERROR] Cannot schedule updates - application may freeze")
     
     def update_loop(self):
         """Main update loop with comprehensive error handling"""
@@ -3542,8 +2629,28 @@ class SimpleKioskApp:
                 print(f"[FACE DEBUG] Recognized employee: {face['name']} ({face['nric']})")
                 employee = self.db.get_employee(face['nric'])
                 
-                # Show confirmation dialog before processing attendance
-                self.show_face_recognition_confirmation(face, employee)
+                # Play detection beep when face is recognized
+                self.play_scan_detected_beep()
+                
+                # Process attendance directly without confirmation
+                print(f"[FACE DEBUG] Processing attendance directly for: {face['name']}")
+                success, message = self.process_attendance_with_location_check(
+                    face['nric'], "face_recognition"
+                )
+                
+                if success:
+                    print(f"[FACE DEBUG] Attendance success: {message}")
+                    if message != "Location selection initiated":
+                        self.show_success_message(f"✓ {employee['name']} - {message}")
+                else:
+                    print(f"[FACE DEBUG] Attendance failed: {message}")
+                    
+                    # Check if this is an early clock-out error
+                    if self.is_early_clockout_error(message):
+                        self.handle_early_clockout_error(employee['name'], message)
+                    else:
+                        self.show_error_message(f"✗ {message}")
+                
                 return
             else:
                 print(f"[FACE DEBUG] Detected unknown face")
@@ -3977,7 +3084,7 @@ class SimpleKioskApp:
                             
                             # If direct recognition fails, try with some padding around the face
                             if not recognized_id:
-                                print(f"[ULTRA DEBUG] Direct recognition failed, trying with padded region...")
+                                print(f"[ULTRA DEBUG] , trying with padded region...")
                                 
                                 # Add padding around the detected face
                                 padding = 30
@@ -4002,10 +3109,16 @@ class SimpleKioskApp:
                                 if db_employee:
                                     employee_name = db_employee.get('name', nric)
                                 else:
-                                    employee_name = nric  # Fallback if employee not found
+                                    # Employee not found in database
+                                    employee_name = nric
+                                    print(f"[ULTRA RECOGNITION] NRIC {nric} not found in database")
+                                    # Show auto-dismiss error message
+                                    self.show_auto_dismiss_error(f"❌ Employee {nric} not found in database")
                                 print(f"[ULTRA RECOGNITION] Face recognized: {employee_name} ({nric}) confidence: {rec_conf:.2f}")
                             else:
                                 print(f"[ULTRA RECOGNITION] Face detected but not recognized (detection conf: {confidence:.2f})")
+                                # Show auto-dismiss error for unrecognized face
+                                self.show_auto_dismiss_error("❌ Face not recognized\nPlease register or try again")
                         except Exception as rec_error:
                             print(f"[ULTRA RECOGNITION] Recognition error: {rec_error}")
                     elif face_region.size > 0 and face_region.shape[0] > 20 and face_region.shape[1] > 20:
@@ -4041,9 +3154,9 @@ class SimpleKioskApp:
                     else:
                         # Detected but unrecognized face
                         if should_recognize:
-                            label = f"Face Detected ({confidence:.2f}){warmup_status}"
+                            label = f"Face Detected {warmup_status}"
                         else:
-                            label = f"Face Detected ({confidence:.2f}){warmup_status}"
+                            label = f"Face Detected {warmup_status}"
                     
                     if is_best:
                         label += " [BEST]"
@@ -4294,8 +3407,14 @@ class SimpleKioskApp:
             self.show_temp_message("No employees in group list!", "orange")
             return
         
+        # Pause camera to prevent continuous face recognition during location selection
+        self.pause_camera_for_popup()
+        
         # Show location selector for the group
         def on_location_selected(location):
+            # Resume camera after location selection (always, whether location selected or cancelled)
+            self.resume_camera_after_popup()
+            
             if location:
                 successful_checkouts = []
                 failed_checkouts = []
